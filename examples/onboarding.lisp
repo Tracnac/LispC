@@ -19,7 +19,7 @@
       ($ "Welcome, %s. This is visit #%d.\n" person.name person.visits)))
 
     (io/write 1 (greeting profile))
-    (io/write 1 ($ "Default role: %s\n" profile.roles.1))
+    (io/write 1 ($ "Default role: %s\n" profile.roles[1]))
 
     ; A loop can return a value through break.
     (let seconds 3)

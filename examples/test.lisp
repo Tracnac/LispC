@@ -16,10 +16,203 @@
 (expect ($ "%t:%s" -1.5 -1.5) "float:-1.5")
 ; String
 (expect ($ "%t:%s" "text" "text") "string:text")
+
+; ============================================================
 ; Array
+; ============================================================
+
+; Basic array equality
 (expect ($ "%t:%s" [1 2 3] [1 2 3]) "array:[1 2 3]")
-;Struct
-(expect ($ "%t:%s" {"name":"Ada"} {"name":"Ada"}) "struct:{name:\"Ada\"}")
+(expect [1 2 3] [1 2 3] "Array equality")
+(expect (eq [1 2 3] [1 2 3]) t "Array equality")
+(expect (eq [1 2 3] [3 2 1]) f "Array order matters")
+(expect (eq [1 [2 3]] [1 [2 3]]) t "Nested array equality")
+(expect (eq [1 [2 3]] [1 [3 2]]) f "Nested array inequality")
+
+
+; ============================================================
+; Nested arrays / struct
+; ============================================================
+
+(let complex-struct
+  {"name":"Yvan"
+   "age":56
+   "address":"1 rue de paris"
+   "city":"Paris"
+   "contact":{
+     "gsm":"0102030405"
+     "fax":"0102030406"
+   }
+   "score":[
+     1
+     2
+     [21 [211 212] 22 23]
+     3
+   ]})
+
+(expect
+  complex-struct
+  {"name":"Yvan"
+   "age":56
+   "address":"1 rue de paris"
+   "city":"Paris"
+   "contact":{
+     "gsm":"0102030405"
+     "fax":"0102030406"
+   }
+   "score":[1 2 [21 [211 212] 22 23] 3]}
+  "Struct equality")
+
+; ------------------------------------------------------------
+; Struct fields
+; ------------------------------------------------------------
+
+(expect complex-struct.name
+        "Yvan"
+        "Get struct string field")
+
+(expect complex-struct.age
+        56
+        "Get struct integer field")
+
+(expect complex-struct.city
+        "Paris"
+        "Get struct field")
+
+(expect complex-struct.contact.gsm
+        "0102030405"
+        "Get nested struct field")
+
+(expect complex-struct.contact.fax
+        "0102030406"
+        "Get nested struct field")
+
+; ------------------------------------------------------------
+; Array indexing
+; ------------------------------------------------------------
+
+(expect complex-struct.score[1]
+        1
+        "Get 1st element of score")
+
+(expect complex-struct.score[2]
+        2
+        "Get 2nd element of score")
+
+(expect complex-struct.score[3]
+        [21 [211 212] 22 23]
+        "Get 3rd element of score")
+
+(expect complex-struct.score[4]
+        3
+        "Get 4th element of score")
+
+; ------------------------------------------------------------
+; Nested array indexing
+; ------------------------------------------------------------
+
+(expect complex-struct.score[3][1]
+        21
+        "Get 1st element of nested score")
+
+(expect complex-struct.score[3][2]
+        [211 212]
+        "Get 2nd element of nested score")
+
+(expect complex-struct.score[3][3]
+        22
+        "Get 3rd element of nested score")
+
+(expect complex-struct.score[3][4]
+        23
+        "Get 4th element of nested score")
+
+(expect complex-struct.score[3][2][1]
+        211
+        "Get nested array element")
+
+(expect complex-struct.score[3][2][2]
+        212
+        "Get nested array element")
+
+; ------------------------------------------------------------
+; Multiple-index selector
+; ------------------------------------------------------------
+
+(expect complex-struct.score[3][[1 3]]
+        [21 22]
+        "Select multiple elements")
+
+(expect complex-struct.score[3][[1 4]]
+        [21 23]
+        "Select first and last elements")
+
+(expect complex-struct.score[3][[2 3]]
+        [[211 212] 22]
+        "Select multiple nested elements")
+
+(expect complex-struct.score[3][2][[1 2]]
+        [211 212]
+        "Select elements from nested array")
+
+; ============================================================
+; Negative indexes
+; ============================================================
+
+(expect complex-struct.score[-1]
+        3
+        "Last element")
+
+(expect complex-struct.score[-2]
+        [21 [211 212] 22 23]
+        "Second-to-last element")
+
+(expect complex-struct.score[3][-1]
+        23
+        "Last nested element")
+
+(expect complex-struct.score[3][2][-1]
+        212
+        "Last deeply nested element")
+
+; Negative ranges
+(expect complex-struct.score[-2..-1]
+        [[21 [211 212] 22 23] 3]
+        "Last two elements")
+
+(expect complex-struct.score[3][-3..-1]
+        [[211 212] 22 23]
+        "Last three nested elements")
+
+; ============================================================
+; Struct equality
+; ============================================================
+
+(expect
+  (eq {"a":1 "b":2} {"a":1 "b":2})
+  t
+  "Struct equality")
+
+(expect
+  (eq {"a":1 "b":2} {"b":2 "a":1})
+  t
+  "Struct key order is irrelevant")
+
+(expect
+  (eq {"a":1 "b":2} {"a":1 "b":3})
+  f
+  "Struct values differ")
+
+(expect
+  (eq {"a":[1 2]} {"a":[1 2]})
+  t
+  "Deep struct equality")
+
+(expect
+  (eq {"a":[1 2]} {"a":[2 1]})
+  f
+  "Deep array order matters")
+  
 ; Function
 (expect ($ "%t:%s" (fn (x) x) (fn (x) x)) "function:<fn>")
 ; Reference

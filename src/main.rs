@@ -23,6 +23,11 @@ enum Value {
     Function(Rc<Function>),
     Ref(Cell),
 }
+#[derive(Clone, Debug)]
+enum IndexSpec {
+    Selector(Box<Expr>),
+    Range(Option<Box<Expr>>, Option<Box<Expr>>),
+}
 #[derive(Clone)]
 struct Function {
     params: Vec<String>,
@@ -72,6 +77,7 @@ enum ExprKind {
     Lit(Literal),
     Symbol(String),
     Field(Box<Expr>, String),
+    Index(Box<Expr>, IndexSpec),
     Ref(Box<Expr>),
     Array(Vec<Expr>),
     Struct(Vec<(String, Expr)>),
@@ -185,6 +191,7 @@ enum TokKind {
     LBrace,
     RBrace,
     Colon,
+    DotDot,
     Dot,
     Caret,
     Symbol(String),
@@ -223,6 +230,10 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
             '{' => Some(TokKind::LBrace),
             '}' => Some(TokKind::RBrace),
             ':' => Some(TokKind::Colon),
+            '.' if cs.get(i + 1) == Some(&'.') => {
+                i += 1;
+                Some(TokKind::DotDot)
+            }
             '.' => Some(TokKind::Dot),
             '^' => Some(TokKind::Caret),
             _ => None,
@@ -294,7 +305,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
             continue;
         }
         // A dot between digits belongs to a float; other dots remain field
-        // separators, so `1.0` and `profile.1` can coexist.
+        // separators, so `1.0` and `profile.name` can coexist.
         if c.is_ascii_digit()
             || matches!(c, '+' | '-') && cs.get(i + 1).is_some_and(|next| next.is_ascii_digit())
         {
@@ -417,8 +428,8 @@ impl Parser {
             .take()
             .ok_or_else(|| Error::Parse("unexpected end".into()))?;
         let start = token.span.start;
-        match token.kind {
-            TokKind::LParen => self.paren(start),
+        let expr = match token.kind {
+            TokKind::LParen => self.paren(start)?,
             TokKind::LBrack => {
                 let mut v = vec![];
                 while self.peek().map(|t| &t.kind) != Some(&TokKind::RBrack) {
@@ -428,34 +439,34 @@ impl Parser {
                     v.push(self.form()?)
                 }
                 let end = self.take().unwrap().span.end;
-                Ok(Expr {
+                Expr {
                     kind: ExprKind::Array(v),
                     span: Span { start, end },
-                })
+                }
             }
-            TokKind::LBrace => self.struct_(start),
+            TokKind::LBrace => self.struct_(start)?,
             TokKind::Caret => {
                 let x = self.atom_field()?;
-                Ok(Expr {
+                Expr {
                     span: Span {
                         start,
                         end: x.span.end,
                     },
                     kind: ExprKind::Ref(Box::new(x)),
-                })
+                }
             }
-            TokKind::Str(s) => Ok(Expr {
+            TokKind::Str(s) => Expr {
                 kind: ExprKind::Lit(Literal::Str(s)),
                 span: token.span,
-            }),
-            TokKind::Int(n) => Ok(Expr {
+            },
+            TokKind::Int(n) => Expr {
                 kind: ExprKind::Lit(Literal::Int(n)),
                 span: token.span,
-            }),
-            TokKind::Float(n) => Ok(Expr {
+            },
+            TokKind::Float(n) => Expr {
                 kind: ExprKind::Lit(Literal::Float(n)),
                 span: token.span,
-            }),
+            },
             TokKind::Symbol(s) => {
                 let e = match s.as_str() {
                     "t" => ExprKind::Lit(Literal::Bool(true)),
@@ -466,41 +477,91 @@ impl Parser {
                     "-Inf" => ExprKind::Lit(Literal::Float(f64::NEG_INFINITY)),
                     _ => ExprKind::Symbol(s),
                 };
-                self.field_tail(Expr {
+                Expr {
                     kind: e,
                     span: token.span,
-                })
+                }
             }
-            x => Err(Error::Parse(format!("unexpected token {x:?}"))),
-        }
+            x => return Err(Error::Parse(format!("unexpected token {x:?}"))),
+        };
+        self.postfix_tail(expr)
     }
     fn atom_field(&mut self) -> Result<Expr, Error> {
         self.form()
     }
-    fn field_tail(&mut self, mut e: Expr) -> Result<Expr, Error> {
-        while self.peek().map(|t| &t.kind) == Some(&TokKind::Dot) {
-            self.take();
-            let key_token = self.take();
-            let (key, end) = match key_token {
-                Some(Tok {
-                    kind: TokKind::Symbol(x),
-                    span,
-                }) => (x, span.end),
-                Some(Tok {
-                    kind: TokKind::Int(n),
-                    span,
-                }) => (n.to_string(), span.end),
-                _ => return Err(Error::Parse("expected field name after dot".into())),
-            };
-            e = Expr {
-                span: Span {
-                    start: e.span.start,
-                    end,
-                },
-                kind: ExprKind::Field(Box::new(e), key),
+    fn postfix_tail(&mut self, mut e: Expr) -> Result<Expr, Error> {
+        loop {
+            match self.peek().map(|t| &t.kind) {
+                Some(TokKind::Dot)
+                    if self
+                        .peek()
+                        .is_some_and(|token| token.span.start == e.span.end) =>
+                {
+                    self.take();
+                    let key_token = self.take();
+                    let (key, end) = match key_token {
+                        Some(Tok {
+                            kind: TokKind::Symbol(x),
+                            span,
+                        }) => (x, span.end),
+                        _ => return Err(Error::Parse("expected struct field after dot".into())),
+                    };
+                    e = Expr {
+                        span: Span {
+                            start: e.span.start,
+                            end,
+                        },
+                        kind: ExprKind::Field(Box::new(e), key),
+                    };
+                }
+                Some(TokKind::LBrack)
+                    if self
+                        .peek()
+                        .is_some_and(|token| token.span.start == e.span.end) =>
+                {
+                    self.take();
+                    let spec = self.index_spec()?;
+                    let end = self
+                        .take()
+                        .ok_or_else(|| Error::Parse("unclosed index selector".into()))?;
+                    if end.kind != TokKind::RBrack {
+                        return Err(Error::Parse("expected ] after index selector".into()));
+                    }
+                    e = Expr {
+                        span: Span {
+                            start: e.span.start,
+                            end: end.span.end,
+                        },
+                        kind: ExprKind::Index(Box::new(e), spec),
+                    };
+                }
+                _ => break,
             }
         }
         Ok(e)
+    }
+    fn index_spec(&mut self) -> Result<IndexSpec, Error> {
+        if self.peek().map(|t| &t.kind) == Some(&TokKind::DotDot) {
+            self.take();
+            let end = if self.peek().map(|t| &t.kind) == Some(&TokKind::RBrack) {
+                None
+            } else {
+                Some(Box::new(self.form()?))
+            };
+            return Ok(IndexSpec::Range(None, end));
+        }
+        let first = self.form()?;
+        if self.peek().map(|t| &t.kind) == Some(&TokKind::DotDot) {
+            self.take();
+            let end = if self.peek().map(|t| &t.kind) == Some(&TokKind::RBrack) {
+                None
+            } else {
+                Some(Box::new(self.form()?))
+            };
+            Ok(IndexSpec::Range(Some(Box::new(first)), end))
+        } else {
+            Ok(IndexSpec::Selector(Box::new(first)))
+        }
     }
     fn paren(&mut self, start: usize) -> Result<Expr, Error> {
         if self.peek().map(|t| &t.kind) == Some(&TokKind::RParen) {
@@ -648,36 +709,45 @@ fn location(e: &Expr, env: &EnvRef) -> Result<Cell, Error> {
         ExprKind::Field(base, key) => {
             let c = follow(location(base, env)?);
             let result = match &*c.borrow() {
-                Value::Array(a) => {
-                    let n = key_parse(key)?;
-                    a.borrow()
-                        .get(n - 1)
-                        .cloned()
-                        .ok_or_else(|| Error::Name(format!("array index {n}")))
-                }
                 Value::Struct(s) => s
                     .borrow()
                     .iter()
                     .find(|(k, _)| k == key)
                     .map(|(_, v)| v.clone())
                     .ok_or_else(|| Error::Name(format!("field {key}"))),
-                _ => Err(Error::Type("field access requires array or struct".into())),
+                _ => Err(Error::Type("struct field access requires a struct".into())),
             };
             result
+        }
+        ExprKind::Index(base, IndexSpec::Selector(selector)) => {
+            let c = follow(location(base, env)?);
+            let index = match eval(selector, env, 0, 0).map_err(flow_err)? {
+                Value::Int(index) => index,
+                Value::Array(_) => {
+                    return Err(Error::Type(
+                        "a multi-index selector cannot be a reference target".into(),
+                    ))
+                }
+                _ => return Err(Error::Type("array index must be an integer".into())),
+            };
+            let result = match &*c.borrow() {
+                Value::Array(array) => {
+                    let array = array.borrow();
+                    array
+                        .get(array_position(&Value::Int(index), array.len())?)
+                        .cloned()
+                        .ok_or_else(|| Error::Name(format!("array index {index} out of bounds")))
+                }
+                _ => Err(Error::Type("indexing requires an array".into())),
+            };
+            result
+        }
+        ExprKind::Index(_, IndexSpec::Range(_, _)) => {
+            Err(Error::Type("a slice cannot be a reference target".into()))
         }
         _ => Err(Error::Type(
             "reference target must be a variable or field".into(),
         )),
-    }
-}
-fn key_parse(key: &str) -> Result<usize, Error> {
-    let n = key
-        .parse::<usize>()
-        .map_err(|_| Error::Type("array index must be a positive integer".into()))?;
-    if n == 0 {
-        Err(Error::Type("array indices are 1-based".into()))
-    } else {
-        Ok(n)
     }
 }
 
@@ -701,6 +771,10 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
         ExprKind::Field(_, _) => location(e, env)
             .map(|c| copy(&c.borrow()))
             .map_err(Into::into),
+        ExprKind::Index(target, spec) => {
+            let value = eval(target, env, loop_depth, match_depth)?;
+            apply_index(value, spec, env, loop_depth, match_depth)
+        }
         ExprKind::Ref(x) => location(x, env).map(Value::Ref).map_err(Into::into),
         ExprKind::Array(xs) => {
             let mut v = vec![];
@@ -738,6 +812,95 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
         }
         ExprKind::Call(head, args) => call(head, args, env, loop_depth, match_depth, e.span),
     }
+}
+fn apply_index(
+    value: Value,
+    spec: &IndexSpec,
+    env: &EnvRef,
+    loop_depth: usize,
+    match_depth: usize,
+) -> EResult {
+    let selector = match spec {
+        IndexSpec::Selector(expr) => eval(expr, env, loop_depth, match_depth)?,
+        IndexSpec::Range(_, _) => Value::Null,
+    };
+    match value {
+        Value::Array(array) => {
+            let values = array.borrow();
+            match spec {
+                IndexSpec::Selector(_) => {
+                    if let Value::Array(indices) = selector {
+                        let indices = indices.borrow();
+                        let mut selected = Vec::with_capacity(indices.len());
+                        for index in indices.iter() {
+                            let position = array_position(&index.borrow(), values.len())?;
+                            selected.push(Rc::new(RefCell::new(copy(&values[position].borrow()))));
+                        }
+                        Ok(Value::Array(Rc::new(RefCell::new(selected))))
+                    } else {
+                        let position = array_position(&selector, values.len())?;
+                        Ok(copy(&values[position].borrow()))
+                    }
+                }
+                IndexSpec::Range(start, end) => {
+                    let (start, end) =
+                        range_positions(start, end, env, loop_depth, match_depth, values.len())?;
+                    let selected = values[start..=end]
+                        .iter()
+                        .map(|cell| Rc::new(RefCell::new(copy(&cell.borrow()))))
+                        .collect();
+                    Ok(Value::Array(Rc::new(RefCell::new(selected))))
+                }
+            }
+        }
+        Value::Str(_) => Err(Error::Type("string indexing is not supported".into()).into()),
+        _ => Err(Error::Type("indexing requires an array".into()).into()),
+    }
+}
+fn array_position(value: &Value, len: usize) -> Result<usize, Error> {
+    let index = match value {
+        Value::Int(index) => *index,
+        _ => return Err(Error::Type("array index must be an integer".into())),
+    };
+    if index == 0 {
+        return Err(Error::Type("array indices are 1-based".into()));
+    }
+    let position = if index > 0 {
+        usize::try_from(index - 1).map_err(|_| Error::Name("array index out of bounds".into()))?
+    } else {
+        let magnitude = usize::try_from(index.unsigned_abs())
+            .map_err(|_| Error::Name("array index out of bounds".into()))?;
+        len.checked_sub(magnitude)
+            .ok_or_else(|| Error::Name(format!("array index {index} out of bounds")))?
+    };
+    if position >= len {
+        Err(Error::Name(format!("array index {index} out of bounds")))
+    } else {
+        Ok(position)
+    }
+}
+fn range_positions(
+    start: &Option<Box<Expr>>,
+    end: &Option<Box<Expr>>,
+    env: &EnvRef,
+    loop_depth: usize,
+    match_depth: usize,
+    len: usize,
+) -> Result<(usize, usize), Flow> {
+    let start = match start {
+        Some(expr) => eval(expr, env, loop_depth, match_depth)?,
+        None => Value::Int(1),
+    };
+    let end = match end {
+        Some(expr) => eval(expr, env, loop_depth, match_depth)?,
+        None => Value::Int(len as i64),
+    };
+    let start = array_position(&start, len)?;
+    let end = array_position(&end, len)?;
+    if start > end {
+        return Err(Error::Type("array slice start must not exceed end".into()).into());
+    }
+    Ok((start, end))
 }
 fn values(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<Vec<Value>, Flow> {
     args.iter().map(|x| eval(x, env, l, m)).collect()
@@ -1707,8 +1870,39 @@ mod tests {
     #[test]
     fn references_mutate_the_original_location() {
         let value =
-            run("(let a [1 2]) (let setzero (fn (x) (set x.1 0))) (setzero ^a) a.1").unwrap();
+            run("(let a [1 2]) (let setzero (fn (x) (set x[1] 0))) (setzero ^a) a[1]").unwrap();
         assert!(matches!(value, Value::Int(0)));
+    }
+
+    #[test]
+    fn arrays_support_bracket_indexing_and_inclusive_slices() {
+        let value = run(r#"(let value [10 20 30 40 50])
+               (expect value[1] 10)
+               (expect value[-1] 50)
+               (expect value[2..4] [20 30 40])
+               (expect value[..2] [10 20])
+               (expect value[4..] [40 50])
+               (expect value[[-1 1]] [50 10])"#)
+        .unwrap();
+        assert!(matches!(value, Value::Bool(true)));
+
+        let value = run(r#"(let value {"score":[23 [1 2 3] 66]})
+               (expect value.score[2][3] 3)
+               (expect value.score[2][[1 3]] [1 3])"#)
+        .unwrap();
+        assert!(matches!(value, Value::Bool(true)));
+    }
+
+    #[test]
+    fn array_dot_access_and_string_bracket_access_are_rejected() {
+        assert!(matches!(
+            run("(let value [1]) value.1"),
+            Err(Error::Parse(message)) if message.contains("struct field")
+        ));
+        assert!(matches!(
+            run(r#""text"[1]"#),
+            Err(Error::Type(message)) if message.contains("string indexing")
+        ));
     }
 
     #[test]
@@ -1775,7 +1969,7 @@ mod tests {
         let value = run("(expect (add 1 0) 1.0 \"integer float test\")").unwrap();
         assert!(matches!(value, Value::Bool(true)));
 
-        let value = run("(let values [10]) values.1").unwrap();
+        let value = run("(let values [10]) values[1]").unwrap();
         assert!(matches!(value, Value::Int(10)));
     }
 

@@ -16,9 +16,9 @@
 (set name "Nouveau")
 (io/write 1 ($ "%s\n" user.name))
 (let nums [1 2 3])
-(let push-zero (fn (a) (set a.1 0)))
+(let push-zero (fn (a) (set a[1] 0)))
 (push-zero ^nums)
-(io/write 1 ($ "%d\n" nums.1))
+(io/write 1 ($ "%d\n" nums[1]))
 
 ; arithmetic, loop, match, regex
 (io/write 1 ($ "%f\n" (div 7 2)))

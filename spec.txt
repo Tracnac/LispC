@@ -11,7 +11,11 @@ float	N.N	f64
 null	_	unit / None
 array	[e1 e2 ...] — hétérogène, imbricable	Vec<Value>
 struct	{"k1":v1 "k2":v2 ...} — clés string uniquement	IndexMap<String, Value> (ordre d'insertion préservé)
-* Indices 1-based partout où une position est utilisée (accès tableau, lecture de flux, etc.).
+* Les indices de tableau sont 1-based : arr[1] est le premier élément et arr[-1] le dernier.
+* Les sélections de tableau sont inclusives : arr[start..end], avec une borne omise
+  autorisée (arr[..end], arr[start..]), et arr[[i j]] sélectionne plusieurs éléments.
+* Les sélections retournent une nouvelle valeur array. Les crochets ne s'appliquent pas aux
+  chaînes pour le moment. L'accès tableau par point (arr.1) est invalide.
 * Virgules optionnelles dans [] et {} : traitées comme du whitespace si présentes.
 * Vérité (truthiness) : tout est vrai sauf 0 (integer), 0.0 (float), f, _.
 
@@ -25,9 +29,10 @@ block       := "(" form* ")"                      ; nouveau scope, retourne la d
 array       := "[" form* "]"
 struct      := "{" (string ":" form)* "}"
 field-access:= identifier ("." identifier)*        ; sucre pour (. (. a b) c)
-ref         := "^" field-access                    ; référence/alias vers un emplacement
+ref        := "^" postfix-access                  ; référence/alias vers un emplacement
+postfix-access := field-access ("[" selector "]")*
 * () est le seul constructeur de scope. if/match n'ouvrent un scope que si leur branche est elle-même un ().
-* . est l'unique forme d'accès à un champ (pas d'accès calculé struct.(expr)). L'indexation de tableau réutilise . avec un entier : arr.1.
+* . est l'unique forme d'accès à un champ struct. Les tableaux utilisent exclusivement les crochets : arr[1], arr[-1], arr[2..5], arr[[1 3]].
 * . retourne une copie de la valeur (accès par valeur). ^ retourne une référence/alias vers l'emplacement (variable, champ de struct, élément de tableau) — voir §7.
 
 4. let / set
@@ -61,9 +66,9 @@ ref         := "^" field-access                    ; référence/alias vers un e
 (>1 ($ "%s" user.name))   ; "Nouveau"
 
 (let nums [1 2 3])
-(let push-zero (fn (a) (set a.1 0)))
+(let push-zero (fn (a) (set a[1] 0)))
 (push-zero ^nums)
-(>1 ($ "%d" nums.1))      ; 0 (mutation en place du tableau)
+(>1 ($ "%d" nums[1]))      ; 0 (mutation en place du tableau)
 * eq déréférence transparemment : comparer une référence à une valeur compare les valeurs pointées, pas des adresses (le langage n'expose aucune notion d'identité de pointeur ailleurs).
 
 8. Arithmétique
@@ -167,9 +172,9 @@ Interpréteur tree-walking en Rust (parse → AST → eval récursif). Pas de by
 
 ; Référence sur tableau entier, mutation en place
 (let nums [1 2 3])
-(let push-zero (fn (a) (set a.1 0)))
+(let push-zero (fn (a) (set a[1] 0)))
 (push-zero ^nums)
-(>1 ($ "%d" nums.1))           ; 0
+(>1 ($ "%d" nums[1]))           ; 0
 
 ; Struct + tableau
 (let user {"name":"Yvan" "tags":["dev" "lisp"]})
