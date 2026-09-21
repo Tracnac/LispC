@@ -27,6 +27,7 @@ struct Function {
     params: Vec<String>,
     body: Expr,
     env: EnvRef,
+    name: Option<String>,
 }
 struct Env {
     values: Vec<(String, Cell)>,
@@ -55,8 +56,18 @@ thread_local! {
     });
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Span {
+    start: usize,
+    end: usize,
+}
 #[derive(Clone, Debug)]
-enum Expr {
+struct Expr {
+    kind: ExprKind,
+    span: Span,
+}
+#[derive(Clone, Debug)]
+enum ExprKind {
     Lit(Literal),
     Symbol(String),
     Field(Box<Expr>, String),
@@ -75,7 +86,7 @@ enum Literal {
     Str(String),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Error {
     Parse(String),
     Name(String),
@@ -117,6 +128,13 @@ enum Flow {
     Break(Value),
     Continue,
 }
+
+thread_local! {
+    static PARSE_ERROR_SPAN: RefCell<Option<Span>> = const { RefCell::new(None) };
+    static CALL_TRACE: RefCell<Vec<(String, Span)>> = const { RefCell::new(Vec::new()) };
+    static LAST_TRACE: RefCell<Vec<(String, Span)>> = const { RefCell::new(Vec::new()) };
+    static LAST_ERROR_SPAN: RefCell<Option<Span>> = const { RefCell::new(None) };
+}
 impl From<Error> for Flow {
     fn from(e: Error) -> Self {
         Flow::Error(e)
@@ -124,7 +142,7 @@ impl From<Error> for Flow {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum Tok {
+enum TokKind {
     LParen,
     RParen,
     LBrack,
@@ -139,6 +157,11 @@ enum Tok {
     Int(i64),
     Float(f64),
 }
+#[derive(Clone, Debug, PartialEq)]
+struct Tok {
+    kind: TokKind,
+    span: Span,
+}
 
 fn lex(src: &str) -> Result<Vec<Tok>, Error> {
     let mut out = Vec::new();
@@ -146,6 +169,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
     let mut i = 0;
     while i < cs.len() {
         let c = cs[i];
+        let token_start = i;
         if c.is_whitespace() || c == ',' {
             i += 1;
             continue;
@@ -157,24 +181,36 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
             continue;
         }
         let one = match c {
-            '(' => Some(Tok::LParen),
-            ')' => Some(Tok::RParen),
-            '[' => Some(Tok::LBrack),
-            ']' => Some(Tok::RBrack),
-            '{' => Some(Tok::LBrace),
-            '}' => Some(Tok::RBrace),
-            ':' => Some(Tok::Colon),
-            '.' => Some(Tok::Dot),
-            '^' => Some(Tok::Caret),
+            '(' => Some(TokKind::LParen),
+            ')' => Some(TokKind::RParen),
+            '[' => Some(TokKind::LBrack),
+            ']' => Some(TokKind::RBrack),
+            '{' => Some(TokKind::LBrace),
+            '}' => Some(TokKind::RBrace),
+            ':' => Some(TokKind::Colon),
+            '.' => Some(TokKind::Dot),
+            '^' => Some(TokKind::Caret),
             _ => None,
         };
         if let Some(t) = one {
-            out.push(t);
+            out.push(Tok {
+                kind: t,
+                span: Span {
+                    start: token_start,
+                    end: i + 1,
+                },
+            });
             i += 1;
             continue;
         }
         if matches!(c, '<' | '>' | '$' | '~') {
-            out.push(Tok::Symbol(c.to_string()));
+            out.push(Tok {
+                kind: TokKind::Symbol(c.to_string()),
+                span: Span {
+                    start: token_start,
+                    end: i + 1,
+                },
+            });
             i += 1;
             continue;
         }
@@ -213,7 +249,13 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
             if !closed {
                 return Err(Error::Parse("unterminated string".into()));
             }
-            out.push(Tok::Str(s));
+            out.push(Tok {
+                kind: TokKind::Str(s),
+                span: Span {
+                    start: token_start,
+                    end: i,
+                },
+            });
             continue;
         }
         // A dot between digits belongs to a float; other dots remain field
@@ -234,7 +276,14 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
                     i += 1;
                 }
                 let s: String = cs[start..i].iter().collect();
-                out.push(number(&s)?.expect("decimal float is a number"));
+                let kind = number(&s)?.expect("decimal float is a number");
+                out.push(Tok {
+                    kind,
+                    span: Span {
+                        start: token_start,
+                        end: i,
+                    },
+                });
                 continue;
             }
             i = start;
@@ -248,14 +297,26 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
         }
         let s: String = cs[start..i].iter().collect();
         if let Some(t) = number(&s)? {
-            out.push(t)
+            out.push(Tok {
+                kind: t,
+                span: Span {
+                    start: token_start,
+                    end: i,
+                },
+            })
         } else {
-            out.push(Tok::Symbol(s))
+            out.push(Tok {
+                kind: TokKind::Symbol(s),
+                span: Span {
+                    start: token_start,
+                    end: i,
+                },
+            })
         }
     }
     Ok(out)
 }
-fn number(s: &str) -> Result<Option<Tok>, Error> {
+fn number(s: &str) -> Result<Option<TokKind>, Error> {
     let (sign, rest) = if let Some(x) = s.strip_prefix('-') {
         (-1i64, x)
     } else if let Some(x) = s.strip_prefix('+') {
@@ -274,7 +335,7 @@ fn number(s: &str) -> Result<Option<Tok>, Error> {
         }
         let v = i64::from_str_radix(d, base)
             .map_err(|_| Error::Parse(format!("invalid number `{s}`")))?;
-        return Ok(Some(Tok::Int(
+        return Ok(Some(TokKind::Int(
             v.checked_mul(sign)
                 .ok_or_else(|| Error::Parse("integer out of range".into()))?,
         )));
@@ -282,13 +343,13 @@ fn number(s: &str) -> Result<Option<Tok>, Error> {
     if rest.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty() {
         return s
             .parse::<i64>()
-            .map(|v| Some(Tok::Int(v)))
+            .map(|v| Some(TokKind::Int(v)))
             .map_err(|_| Error::Parse(format!("integer out of range `{s}`")));
     }
     if rest.contains('.') {
         return s
             .parse::<f64>()
-            .map(|v| Some(Tok::Float(v)))
+            .map(|v| Some(TokKind::Float(v)))
             .map_err(|_| Error::Parse(format!("invalid float `{s}`")));
     }
     Ok(None)
@@ -303,6 +364,9 @@ impl Parser {
     }
     fn take(&mut self) -> Option<Tok> {
         let x = self.ts.get(self.i).cloned();
+        if let Some(token) = &x {
+            PARSE_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(token.span));
+        }
         self.i += 1;
         x
     }
@@ -314,38 +378,63 @@ impl Parser {
         Ok(x)
     }
     fn form(&mut self) -> Result<Expr, Error> {
-        match self
+        let token = self
             .take()
-            .ok_or_else(|| Error::Parse("unexpected end".into()))?
-        {
-            Tok::LParen => self.paren(),
-            Tok::LBrack => {
+            .ok_or_else(|| Error::Parse("unexpected end".into()))?;
+        let start = token.span.start;
+        match token.kind {
+            TokKind::LParen => self.paren(start),
+            TokKind::LBrack => {
                 let mut v = vec![];
-                while self.peek() != Some(&Tok::RBrack) {
+                while self.peek().map(|t| &t.kind) != Some(&TokKind::RBrack) {
                     if self.peek().is_none() {
                         return Err(Error::Parse("unclosed array".into()));
                     }
                     v.push(self.form()?)
                 }
-                self.take();
-                Ok(Expr::Array(v))
+                let end = self.take().unwrap().span.end;
+                Ok(Expr {
+                    kind: ExprKind::Array(v),
+                    span: Span { start, end },
+                })
             }
-            Tok::LBrace => self.struct_(),
-            Tok::Caret => Ok(Expr::Ref(Box::new(self.atom_field()?))),
-            Tok::Str(s) => Ok(Expr::Lit(Literal::Str(s))),
-            Tok::Int(n) => Ok(Expr::Lit(Literal::Int(n))),
-            Tok::Float(n) => Ok(Expr::Lit(Literal::Float(n))),
-            Tok::Symbol(s) => {
+            TokKind::LBrace => self.struct_(start),
+            TokKind::Caret => {
+                let x = self.atom_field()?;
+                Ok(Expr {
+                    span: Span {
+                        start,
+                        end: x.span.end,
+                    },
+                    kind: ExprKind::Ref(Box::new(x)),
+                })
+            }
+            TokKind::Str(s) => Ok(Expr {
+                kind: ExprKind::Lit(Literal::Str(s)),
+                span: token.span,
+            }),
+            TokKind::Int(n) => Ok(Expr {
+                kind: ExprKind::Lit(Literal::Int(n)),
+                span: token.span,
+            }),
+            TokKind::Float(n) => Ok(Expr {
+                kind: ExprKind::Lit(Literal::Float(n)),
+                span: token.span,
+            }),
+            TokKind::Symbol(s) => {
                 let e = match s.as_str() {
-                    "t" => Expr::Lit(Literal::Bool(true)),
-                    "f" => Expr::Lit(Literal::Bool(false)),
-                    "_" => Expr::Lit(Literal::Null),
-                    "NaN" => Expr::Lit(Literal::Float(f64::NAN)),
-                    "Inf" => Expr::Lit(Literal::Float(f64::INFINITY)),
-                    "-Inf" => Expr::Lit(Literal::Float(f64::NEG_INFINITY)),
-                    _ => Expr::Symbol(s),
+                    "t" => ExprKind::Lit(Literal::Bool(true)),
+                    "f" => ExprKind::Lit(Literal::Bool(false)),
+                    "_" => ExprKind::Lit(Literal::Null),
+                    "NaN" => ExprKind::Lit(Literal::Float(f64::NAN)),
+                    "Inf" => ExprKind::Lit(Literal::Float(f64::INFINITY)),
+                    "-Inf" => ExprKind::Lit(Literal::Float(f64::NEG_INFINITY)),
+                    _ => ExprKind::Symbol(s),
                 };
-                self.field_tail(e)
+                self.field_tail(Expr {
+                    kind: e,
+                    span: token.span,
+                })
             }
             x => Err(Error::Parse(format!("unexpected token {x:?}"))),
         }
@@ -354,55 +443,83 @@ impl Parser {
         self.form()
     }
     fn field_tail(&mut self, mut e: Expr) -> Result<Expr, Error> {
-        while self.peek() == Some(&Tok::Dot) {
+        while self.peek().map(|t| &t.kind) == Some(&TokKind::Dot) {
             self.take();
-            let key = match self.take() {
-                Some(Tok::Symbol(x)) => x,
-                Some(Tok::Int(n)) => n.to_string(),
+            let key_token = self.take();
+            let (key, end) = match key_token {
+                Some(Tok {
+                    kind: TokKind::Symbol(x),
+                    span,
+                }) => (x, span.end),
+                Some(Tok {
+                    kind: TokKind::Int(n),
+                    span,
+                }) => (n.to_string(), span.end),
                 _ => return Err(Error::Parse("expected field name after dot".into())),
             };
-            e = Expr::Field(Box::new(e), key)
+            e = Expr {
+                span: Span {
+                    start: e.span.start,
+                    end,
+                },
+                kind: ExprKind::Field(Box::new(e), key),
+            }
         }
         Ok(e)
     }
-    fn paren(&mut self) -> Result<Expr, Error> {
-        if self.peek() == Some(&Tok::RParen) {
-            self.take();
-            return Ok(Expr::Block(vec![]));
+    fn paren(&mut self, start: usize) -> Result<Expr, Error> {
+        if self.peek().map(|t| &t.kind) == Some(&TokKind::RParen) {
+            let end = self.take().unwrap().span.end;
+            return Ok(Expr {
+                kind: ExprKind::Block(vec![]),
+                span: Span { start, end },
+            });
         }
         let first = self.form()?;
         let mut rest = vec![];
-        while self.peek() != Some(&Tok::RParen) {
+        while self.peek().map(|t| &t.kind) != Some(&TokKind::RParen) {
             if self.peek().is_none() {
                 return Err(Error::Parse("unclosed parenthesis".into()));
             }
             rest.push(self.form()?)
         }
-        self.take();
-        match first {
-            Expr::Symbol(_) | Expr::Field(_, _) => Ok(Expr::Call(Box::new(first), rest)),
+        let end = self.take().unwrap().span.end;
+        match first.kind {
+            ExprKind::Symbol(_) | ExprKind::Field(_, _) => Ok(Expr {
+                kind: ExprKind::Call(Box::new(first), rest),
+                span: Span { start, end },
+            }),
             _ => {
                 let mut all = vec![first];
                 all.extend(rest);
-                Ok(Expr::Block(all))
+                Ok(Expr {
+                    kind: ExprKind::Block(all),
+                    span: Span { start, end },
+                })
             }
         }
     }
-    fn struct_(&mut self) -> Result<Expr, Error> {
+    fn struct_(&mut self, start: usize) -> Result<Expr, Error> {
         let mut v = vec![];
-        while self.peek() != Some(&Tok::RBrace) {
+        while self.peek().map(|t| &t.kind) != Some(&TokKind::RBrace) {
             let key = match self.take() {
-                Some(Tok::Str(x)) => x,
+                Some(Tok {
+                    kind: TokKind::Str(x),
+                    ..
+                }) => x,
                 _ => return Err(Error::Parse("struct key must be string".into())),
             };
-            if self.take() != Some(Tok::Colon) {
+            if self.take().map(|t| t.kind) != Some(TokKind::Colon) {
                 return Err(Error::Parse("expected : after struct key".into()));
             }
             let val = self.form()?;
             v.push((key, val));
         }
-        self.take();
-        Ok(Expr::Struct(v))
+        let end = self.take().unwrap().span.end;
+        Ok(Expr {
+            kind: ExprKind::Struct(v),
+            span: Span { start, end },
+        })
     }
 }
 
@@ -483,9 +600,9 @@ fn render(v: &Value) -> String {
     }
 }
 fn location(e: &Expr, env: &EnvRef) -> Result<Cell, Error> {
-    match e {
-        Expr::Symbol(n) => lookup(env, n).ok_or_else(|| Error::Name(n.clone())),
-        Expr::Field(base, key) => {
+    match &e.kind {
+        ExprKind::Symbol(n) => lookup(env, n).ok_or_else(|| Error::Name(n.clone())),
+        ExprKind::Field(base, key) => {
             let c = follow(location(base, env)?);
             let result = match &*c.borrow() {
                 Value::Array(a) => {
@@ -522,22 +639,23 @@ fn key_parse(key: &str) -> Result<usize, Error> {
 }
 
 fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResult {
-    match e {
-        Expr::Lit(x) => Ok(match x {
+    LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(e.span));
+    match &e.kind {
+        ExprKind::Lit(x) => Ok(match x {
             Literal::Null => Value::Null,
             Literal::Bool(b) => Value::Bool(*b),
             Literal::Int(n) => Value::Int(*n),
             Literal::Float(n) => Value::Float(*n),
             Literal::Str(s) => Value::Str(s.clone()),
         }),
-        Expr::Symbol(n) => lookup(env, n)
+        ExprKind::Symbol(n) => lookup(env, n)
             .map(|c| copy(&c.borrow()))
             .ok_or_else(|| Flow::Error(Error::Name(n.clone()))),
-        Expr::Field(_, _) => location(e, env)
+        ExprKind::Field(_, _) => location(e, env)
             .map(|c| copy(&c.borrow()))
             .map_err(Into::into),
-        Expr::Ref(x) => location(x, env).map(Value::Ref).map_err(Into::into),
-        Expr::Array(xs) => {
+        ExprKind::Ref(x) => location(x, env).map(Value::Ref).map_err(Into::into),
+        ExprKind::Array(xs) => {
             let mut v = vec![];
             for x in xs {
                 v.push(Rc::new(RefCell::new(eval(
@@ -549,7 +667,7 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
             }
             Ok(Value::Array(Rc::new(RefCell::new(v))))
         }
-        Expr::Struct(xs) => {
+        ExprKind::Struct(xs) => {
             let mut seen = HashSet::new();
             let mut v = vec![];
             for (k, x) in xs {
@@ -563,7 +681,7 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
             }
             Ok(Value::Struct(Rc::new(RefCell::new(v))))
         }
-        Expr::Block(xs) => {
+        ExprKind::Block(xs) => {
             let child = new_env(Some(env.clone()));
             let mut r = Value::Null;
             for x in xs {
@@ -571,7 +689,7 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
             }
             Ok(r)
         }
-        Expr::Call(head, args) => call(head, args, env, loop_depth, match_depth),
+        ExprKind::Call(head, args) => call(head, args, env, loop_depth, match_depth, e.span),
     }
 }
 fn values(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<Vec<Value>, Flow> {
@@ -584,17 +702,23 @@ fn need(args: &[Expr], n: usize, name: &str) -> Result<(), Flow> {
         Err(Error::Arity(format!("{name} expects {n} arguments, got {}", args.len())).into())
     }
 }
-fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult {
-    if let Expr::Symbol(name) = head {
+fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span: Span) -> EResult {
+    if let ExprKind::Symbol(name) = &head.kind {
         match name.as_str() {
             "let" => {
                 need(args, 2, "let")?;
-                let n = if let Expr::Symbol(n) = &args[0] {
+                let n = if let ExprKind::Symbol(n) = &args[0].kind {
                     n
                 } else {
                     return Err(Error::Type("let name must be an identifier".into()).into());
                 };
                 let v = eval(&args[1], env, l, m)?;
+                let mut v = v;
+                if let Value::Function(function) = &mut v {
+                    if let Some(function) = Rc::get_mut(function) {
+                        function.name = Some(n.clone());
+                    }
+                }
                 env.borrow_mut()
                     .values
                     .push((n.clone(), Rc::new(RefCell::new(v))));
@@ -624,11 +748,11 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult
                 if args.len() < 2 {
                     return Err(Error::Arity("fn expects parameters and body".into()).into());
                 }
-                let ps = match &args[0] {
-                    Expr::Block(xs) => xs
+                let ps = match &args[0].kind {
+                    ExprKind::Block(xs) => xs
                         .iter()
                         .map(|x| {
-                            if let Expr::Symbol(s) = x {
+                            if let ExprKind::Symbol(s) = &x.kind {
                                 Ok(s.clone())
                             } else {
                                 Err(Error::Type("function parameter must be identifier".into()))
@@ -636,12 +760,12 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult
                         })
                         .collect::<Result<Vec<_>, _>>()
                         .map_err(Flow::Error)?,
-                    Expr::Call(h, xs) => {
+                    ExprKind::Call(h, xs) => {
                         let mut all = vec![*h.clone()];
                         all.extend(xs.clone());
                         all.iter()
                             .map(|x| {
-                                if let Expr::Symbol(s) = x {
+                                if let ExprKind::Symbol(s) = &x.kind {
                                     Ok(s.clone())
                                 } else {
                                     Err(Error::Type("function parameter must be identifier".into()))
@@ -656,11 +780,12 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult
                     params: ps,
                     body: args[1].clone(),
                     env: env.clone(),
+                    name: None,
                 }));
                 if args.len() == 2 {
                     return Ok(fun);
                 }
-                return invoke(fun, values(&args[2..], env, l, m)?);
+                return invoke(fun, values(&args[2..], env, l, m)?, call_span);
             }
             "loop" => {
                 let local = new_env(Some(env.clone()));
@@ -789,12 +914,12 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult
         }
     }
     let fun = eval(head, env, l, m)?;
-    invoke(fun, values(args, env, l, m)?)
+    invoke(fun, values(args, env, l, m)?, call_span)
 }
-fn invoke(f: Value, vals: Vec<Value>) -> EResult {
+fn invoke(f: Value, vals: Vec<Value>, call_span: Span) -> EResult {
     let f = match f {
         Value::Function(f) => f,
-        Value::Ref(c) => return invoke(copy(&c.borrow()), vals),
+        Value::Ref(c) => return invoke(copy(&c.borrow()), vals, call_span),
         _ => return Err(Error::Type("value is not callable".into()).into()),
     };
     if f.params.len() != vals.len() {
@@ -811,7 +936,26 @@ fn invoke(f: Value, vals: Vec<Value>) -> EResult {
             .values
             .push((n.clone(), Rc::new(RefCell::new(v))));
     }
-    eval(&f.body, &e, 0, 0)
+    let name = f
+        .name
+        .clone()
+        .unwrap_or_else(|| "<anonymous function>".into());
+    CALL_TRACE.with(|trace| trace.borrow_mut().push((name, call_span)));
+    let result = eval(&f.body, &e, 0, 0);
+    if result.is_err() {
+        CALL_TRACE.with(|trace| {
+            LAST_TRACE.with(|last| {
+                let trace = trace.borrow();
+                if trace.len() > last.borrow().len() {
+                    *last.borrow_mut() = trace.clone();
+                }
+            });
+        });
+    }
+    CALL_TRACE.with(|trace| {
+        trace.borrow_mut().pop();
+    });
+    result
 }
 fn as_int(v: Value) -> Result<i64, Flow> {
     if let Value::Int(x) = v {
@@ -1412,8 +1556,42 @@ fn equals(a: &Value, b: &Value) -> bool {
         _ => false,
     }
 }
+fn diagnostic(error: &Error, source: &str, file: &str, span: Option<Span>) -> String {
+    let span = span.unwrap_or(Span { start: 0, end: 0 });
+    let offset = span.start.min(source.len());
+    let line = source[..offset].bytes().filter(|b| *b == b'\n').count() + 1;
+    let line_start = source[..offset].rfind('\n').map_or(0, |p| p + 1);
+    let line_end = source[offset..]
+        .find('\n')
+        .map_or(source.len(), |p| offset + p);
+    let column = source[line_start..offset].chars().count() + 1;
+    let excerpt = &source[line_start..line_end];
+    let caret = format!("{}^", " ".repeat(column.saturating_sub(1)));
+    let mut out = format!("{file}:{line}:{column}: {error}\n{excerpt}\n{caret}");
+    let trace = LAST_TRACE.with(|last| last.borrow().clone());
+    if !trace.is_empty() {
+        out.push_str("\ncall trace:");
+        for (name, frame) in trace.iter().rev() {
+            let line = source[..frame.start.min(source.len())]
+                .bytes()
+                .filter(|b| *b == b'\n')
+                .count()
+                + 1;
+            let line_start = source[..frame.start.min(source.len())]
+                .rfind('\n')
+                .map_or(0, |p| p + 1);
+            let column = source[line_start..frame.start.min(source.len())]
+                .chars()
+                .count()
+                + 1;
+            out.push_str(&format!("\n  {name} at {file}:{line}:{column}"));
+        }
+    }
+    out
+}
 fn main() {
     let args: Vec<String> = env::args().collect();
+    let file = args.get(1).map_or("<stdin>", String::as_str);
     let src = if args.len() > 1 {
         fs::read_to_string(&args[1]).map_err(|e| Error::Io(e.to_string()))
     } else {
@@ -1423,17 +1601,27 @@ fn main() {
             .map(|_| s)
             .map_err(|e| Error::Io(e.to_string()))
     };
-    let result = (|| -> Result<(), Error> {
-        let ts = lex(&src?)?;
-        let p = Parser { ts, i: 0 }.program()?;
+    let result = (|| -> Result<(), (Error, bool)> {
+        let source = src.clone().map_err(|e| (e, false))?;
+        let ts = lex(&source).map_err(|e| (e, true))?;
+        let p = Parser { ts, i: 0 }.program().map_err(|e| (e, true))?;
         let e = new_env(None);
         for x in p {
-            eval(&x, &e, 0, 0).map_err(flow_err)?;
+            eval(&x, &e, 0, 0).map_err(|e| (flow_err(e), false))?;
         }
         Ok(())
     })();
-    if let Err(e) = result {
-        let _ = writeln!(io::stderr(), "{e}");
+    if let Err((e, parse)) = result {
+        let source = match &src {
+            Ok(source) => source,
+            Err(_) => "",
+        };
+        let span = if parse {
+            PARSE_ERROR_SPAN.with(|span| *span.borrow())
+        } else {
+            LAST_ERROR_SPAN.with(|span| *span.borrow())
+        };
+        let _ = writeln!(io::stderr(), "{}", diagnostic(&e, source, file, span));
         std::process::exit(1)
     }
 }
@@ -1443,6 +1631,7 @@ mod tests {
     use super::*;
 
     fn run(src: &str) -> Result<Value, Error> {
+        LAST_TRACE.with(|trace| trace.borrow_mut().clear());
         let tokens = lex(src)?;
         let program = Parser { ts: tokens, i: 0 }.program()?;
         let env = new_env(None);
@@ -1564,10 +1753,19 @@ mod tests {
 
     #[test]
     fn bitwise_operations_require_integers_and_valid_shift_counts() {
-        assert!(matches!(
-            run("(bit-and 1 (div 1.0 2))"),
-            Err(Error::Type(message)) if message == "bitwise operations require integers"
-        ));
+        for source in [
+            "(bit-and 1.0 2)",
+            "(bit-or 1 \"2\")",
+            "(bit-xor 1 t)",
+            "(bit-not _)",
+            "(bit-shl 1 2.0)",
+            "(bit-shr 4 f)",
+        ] {
+            assert!(matches!(
+                run(source),
+                Err(Error::Type(message)) if message == "bitwise operations require integers"
+            ));
+        }
         assert!(matches!(
             run("(bit-shl 1 64)"),
             Err(Error::Math(message)) if message == "InvalidShiftCount"
@@ -1616,5 +1814,53 @@ mod tests {
         });
         assert!(matches!(run("(io/write 1 \"\")"), Ok(Value::Int(0))));
         assert!(matches!(run("(io/write 2 \"\")"), Ok(Value::Int(0))));
+    }
+
+    #[test]
+    fn diagnostics_include_source_location_and_excerpt() {
+        let source = "(let x 1)\n(div x 0)";
+        let error = match run(source) {
+            Err(error) => error,
+            Ok(_) => panic!("expected runtime error"),
+        };
+        let span = LAST_ERROR_SPAN.with(|span| *span.borrow());
+        let rendered = diagnostic(&error, source, "sample.lisp", span);
+        assert!(rendered.starts_with("sample.lisp:2:"));
+        assert!(rendered.contains("(div x 0)"));
+        assert!(rendered.contains("^"));
+    }
+
+    #[test]
+    fn nested_user_function_errors_include_call_trace() {
+        let error = match run("(let inner (fn () (div 1 0))) (let outer (fn () (inner))) (outer)") {
+            Err(error) => error,
+            Ok(_) => panic!("expected runtime error"),
+        };
+        let span = LAST_ERROR_SPAN.with(|span| *span.borrow());
+        let rendered = diagnostic(
+            &error,
+            "(let inner (fn () (div 1 0))) (let outer (fn () (inner))) (outer)",
+            "x",
+            span,
+        );
+        assert!(rendered.contains("call trace:"));
+        assert!(rendered.contains("outer"));
+        assert!(rendered.contains("inner"));
+        assert!(rendered.contains("at x:1:"));
+    }
+
+    #[test]
+    fn parse_diagnostics_point_at_the_failing_token() {
+        let source = "(let x 1";
+        let error = Parser {
+            ts: lex(source).unwrap(),
+            i: 0,
+        }
+        .program()
+        .unwrap_err();
+        let span = PARSE_ERROR_SPAN.with(|span| *span.borrow());
+        let rendered = diagnostic(&error, source, "sample.lisp", span);
+        assert!(rendered.starts_with("sample.lisp:1:"));
+        assert!(rendered.contains("^"));
     }
 }

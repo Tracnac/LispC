@@ -51,13 +51,12 @@
 (expect (and f t) f)
 (expect (and f f) f)
 
-; and — truthiness
-(expect (and 1 2) t)
-(expect (and 1 0) f)
-(expect (and 1 0.0) f)
-(expect (and 1 _) f)
-(expect (and 1 "foo") t)
-(expect (and 1 []) t)
+(expect (and 1 2) 2)
+(expect (and 1 0) 0)
+(expect (and 0 2) 0)
+(expect (and 0.0 2) 0.0)
+(expect (and 1 _) _)
+(expect (and 1 "foo") "foo")
 
 ; or
 (expect (or t t) t)
@@ -65,12 +64,11 @@
 (expect (or f t) t)
 (expect (or f f) f)
 
-; or — truthiness
-(expect (or 0 1) t)
-(expect (or 0 0.0) f)
-(expect (or _ f) f)
-(expect (or 0 "foo") t)
-(expect (or 0 []) t)
+(expect (or 1 2) 1)
+(expect (or 0 2) 2)
+(expect (or 0.0 2) 2)
+(expect (or _ 2) 2)
+(expect (or f "foo") "foo")
 
 ; not
 (expect (not t) f)
@@ -209,7 +207,7 @@
 
 (expect (if 0 "zero" "non-zero") "non-zero")
 (expect (if 0.0 "zero" "non-zero") "non-zero")
-(expect (if _ "null" "value") "null")
+(expect (if _ "value" "null") "null")
 (expect (if "foo" "yes" "no") "yes")
 
 ; match
