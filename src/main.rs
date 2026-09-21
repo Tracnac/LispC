@@ -5,6 +5,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     rc::Rc,
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 type Cell = Rc<RefCell<Value>>;
@@ -101,6 +102,7 @@ enum Error {
     Match,
     ContinueOutsideLoop,
     BreakOutside,
+    Interrupted,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -119,6 +121,7 @@ impl fmt::Display for Error {
             Match => write!(f, "MatchError: no predicate matched"),
             ContinueOutsideLoop => write!(f, "ContinueOutsideLoop"),
             BreakOutside => write!(f, "BreakOutsideLoopOrMatch"),
+            Interrupted => write!(f, "Interrupted"),
         }
     }
 }
@@ -135,6 +138,38 @@ thread_local! {
     static LAST_TRACE: RefCell<Vec<(String, Span)>> = const { RefCell::new(Vec::new()) };
     static LAST_ERROR_SPAN: RefCell<Option<Span>> = const { RefCell::new(None) };
 }
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+unsafe extern "C" fn handle_sigint(_: i32) {
+    INTERRUPTED.store(true, Ordering::Relaxed);
+}
+
+#[cfg(unix)]
+fn install_sigint_handler() {
+    unsafe {
+        unsafe extern "C" {
+            fn signal(
+                signal: i32,
+                handler: Option<unsafe extern "C" fn(i32)>,
+            ) -> Option<unsafe extern "C" fn(i32)>;
+        }
+        const SIGINT: i32 = 2;
+        let _ = signal(SIGINT, Some(handle_sigint));
+    }
+}
+
+#[cfg(not(unix))]
+fn install_sigint_handler() {}
+
+fn check_interrupted() -> Result<(), Error> {
+    if INTERRUPTED.load(Ordering::Relaxed) {
+        Err(Error::Interrupted)
+    } else {
+        Ok(())
+    }
+}
+
 impl From<Error> for Flow {
     fn from(e: Error) -> Self {
         Flow::Error(e)
@@ -584,7 +619,7 @@ fn render(v: &Value) -> String {
             "[{}]",
             a.borrow()
                 .iter()
-                .map(|x| render(&x.borrow()))
+                .map(|x| render_nested(&x.borrow()))
                 .collect::<Vec<_>>()
                 .join(" ")
         ),
@@ -592,11 +627,19 @@ fn render(v: &Value) -> String {
             "{{{}}}",
             s.borrow()
                 .iter()
-                .map(|(k, v)| format!("\"{k}\":{}", render(&v.borrow())))
+                .map(|(k, v)| format!("{k}:{}", render_nested(&v.borrow())))
                 .collect::<Vec<_>>()
                 .join(" ")
         ),
         Value::Function(_) => "<fn>".into(),
+    }
+}
+fn render_nested(v: &Value) -> String {
+    match v {
+        Value::Str(value) => json_string(value),
+        Value::Ref(cell) => render_nested(&cell.borrow()),
+        Value::Array(_) | Value::Struct(_) => render(v),
+        _ => render(v),
     }
 }
 fn location(e: &Expr, env: &EnvRef) -> Result<Cell, Error> {
@@ -639,6 +682,10 @@ fn key_parse(key: &str) -> Result<usize, Error> {
 }
 
 fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResult {
+    if let Err(error) = check_interrupted() {
+        LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(e.span));
+        return Err(error.into());
+    }
     LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(e.span));
     match &e.kind {
         ExprKind::Lit(x) => Ok(match x {
@@ -790,6 +837,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
             "loop" => {
                 let local = new_env(Some(env.clone()));
                 loop {
+                    check_interrupted().map_err(Flow::Error)?;
                     for a in args {
                         match eval(a, &local, l + 1, m) {
                             Ok(_) => {}
@@ -1038,9 +1086,11 @@ fn io_read(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult {
     })
 }
 fn read_line(file: &mut File) -> Result<Option<String>, Error> {
+    check_interrupted()?;
     let mut bytes = Vec::new();
     let mut byte = [0; 1];
     loop {
+        check_interrupted()?;
         match file.read(&mut byte).map_err(|e| Error::Io(e.to_string()))? {
             0 if bytes.is_empty() => return Ok(None),
             0 => break,
@@ -1057,10 +1107,12 @@ fn read_line(file: &mut File) -> Result<Option<String>, Error> {
         .map_err(|_| Error::Io("input is not valid UTF-8".into()))
 }
 fn read_stdin_line() -> Result<Option<String>, Error> {
+    check_interrupted()?;
     let mut line = String::new();
     let bytes = io::stdin()
         .read_line(&mut line)
         .map_err(|e| Error::Io(e.to_string()))?;
+    check_interrupted()?;
     if bytes == 0 {
         Ok(None)
     } else {
@@ -1590,6 +1642,7 @@ fn diagnostic(error: &Error, source: &str, file: &str, span: Option<Span>) -> St
     out
 }
 fn main() {
+    install_sigint_handler();
     let args: Vec<String> = env::args().collect();
     let file = args.get(1).map_or("<stdin>", String::as_str);
     let src = if args.len() > 1 {
@@ -1684,6 +1737,13 @@ mod tests {
 
         let value = run("($ \"%t %t\" 1 [1])").unwrap();
         assert!(matches!(value, Value::Str(text) if text == "int array"));
+
+        let value =
+            run(r#"($ "%s" {"name":"Yvan" "contact":{"gsm":"0102030405"} "score":["ok" 2]})"#)
+                .unwrap();
+        assert!(
+            matches!(value, Value::Str(text) if text == r#"{name:"Yvan" contact:{gsm:"0102030405"} score:["ok" 2]}"#)
+        );
 
         let value = run("($ \"%j\" {\"name\": \"Ada\" \"values\": [1 t _]})").unwrap();
         assert!(

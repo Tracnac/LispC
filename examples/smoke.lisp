@@ -8,8 +8,7 @@
 (io/write 1 ($ "%d\n" counter))
 
 ; recursion
-(let fact (fn (n) (if (eq n 0) 1 (mul n (fact (sub n 1))))))
-(io/write 1 ($ "%d\n" (fact 5)))
+(let fact (fn (n) (if (eq n 0) 1 (mul n (fact (sub n 1))))))(io/write 1 ($ "%d\n" (fact 5)))
 
 ; aliases and containers
 (let user {"name":"Yvan" "tags":["dev" "lisp"]})

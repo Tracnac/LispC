@@ -1,5 +1,6 @@
 Small Lisp — Spécification
 Langage Lisp minimal, interprété (tree-walking), pensé pour du scripting IO simple.
+
 1. Types
 Type	Notation	Rust interne
 string	"..." (échappement \n, \t, etc.)	String
@@ -13,8 +14,10 @@ struct	{"k1":v1 "k2":v2 ...} — clés string uniquement	IndexMap<String, Value>
 * Indices 1-based partout où une position est utilisée (accès tableau, lecture de flux, etc.).
 * Virgules optionnelles dans [] et {} : traitées comme du whitespace si présentes.
 * Vérité (truthiness) : tout est vrai sauf 0 (integer), 0.0 (float), f, _.
+
 2. Identifiants
 Regex : [A-Za-z0-9_-]+, ASCII uniquement. Un identifiant ne peut pas commencer par un chiffre en pratique — le lexer doit essayer de parser un nombre en premier ; si ça échoue, il retombe sur un identifiant.
+
 3. Grammaire
 form        := call | block | array | struct | literal | field-access | ref
 call        := "(" symbol form* ")"
@@ -26,6 +29,7 @@ ref         := "^" field-access                    ; référence/alias vers un e
 * () est le seul constructeur de scope. if/match n'ouvrent un scope que si leur branche est elle-même un ().
 * . est l'unique forme d'accès à un champ (pas d'accès calculé struct.(expr)). L'indexation de tableau réutilise . avec un entier : arr.1.
 * . retourne une copie de la valeur (accès par valeur). ^ retourne une référence/alias vers l'emplacement (variable, champ de struct, élément de tableau) — voir §7.
+
 4. let / set
 * Les deux évaluent strictement leur expression valeur.
 * let crée toujours une nouvelle liaison dans le scope courant (le () englobant le plus proche).
