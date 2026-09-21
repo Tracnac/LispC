@@ -14,8 +14,7 @@ struct	{"k1":v1 "k2":v2 ...} — clés string uniquement	IndexMap<String, Value>
 * Les indices de tableau sont 1-based : arr[1] est le premier élément et arr[-1] le dernier.
 * Les sélections de tableau sont inclusives : arr[start..end], avec une borne omise
   autorisée (arr[..end], arr[start..]), et arr[[i j]] sélectionne plusieurs éléments.
-* Les sélections retournent une nouvelle valeur array. Les crochets ne s'appliquent pas aux
-  chaînes pour le moment. L'accès tableau par point (arr.1) est invalide.
+* Les sélections retournent une nouvelle valeur array.
 * Virgules optionnelles dans [] et {} : traitées comme du whitespace si présentes.
 * Vérité (truthiness) : tout est vrai sauf 0 (integer), 0.0 (float), f, _.
 
@@ -47,7 +46,18 @@ postfix-access := field-access ("[" selector "]")*
 * Les closures capturent l'environnement par référence : set depuis une closure mute bien la variable extérieure. C'est ce qui permet la récursion (le nom se résout au moment de l'appel, pas de la définition) et les compteurs mutables.
 
 6. Fonctions
-* Arité fixe. Trop peu / trop d'arguments → ArityError à l'appel. Pas de varargs, pas de currying.
+* L'arité est une propriété de chaque appelable. Les fonctions créées par `fn` ont une arité
+  fixe : trop peu ou trop d'arguments → ArityError à l'appel. Les builtins peuvent être fixes
+  ou variadiques selon leur définition.
+* `add` et `mul` acceptent zéro argument (identités 0 et 1) et un nombre quelconque d'arguments.
+  `sub` et `div` acceptent au moins un argument et effectuent un pliage gauche ; `sub` unaire
+  est la négation et `div` unaire est le réciproque (Float).
+* `eq`, `ne`, `lt`, `gt`, `le` et `ge` acceptent zéro argument ou plus. Les comparaisons
+  multiples sont chaînées ; avec zéro ou un argument, le résultat est vrai.
+* `mod` et `pow` exigent exactement deux arguments. `bit-and`, `bit-or` et `bit-xor` sont
+  variadiques (identités -1, 0 et 0) ; `bit-not` exige exactement un argument. `bit-shl` et
+  `bit-shr` exigent exactement deux arguments.
+* Il n'y a pas de currying automatique.
 * Passage d'argument par valeur par défaut (copie). Passer ^x fait de l'argument un alias de x : un set dans le corps de la fonction mute la variable de l'appelant.
 * Récursion native : le corps d'un fn n'est évalué qu'à l'appel, et la closure référence son environnement par pointeur — pas besoin de letrec.
 

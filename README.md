@@ -18,6 +18,19 @@ cargo test
 
 The implementation includes lexical scopes and mutable closures, recursive fixed-arity functions, explicit aliases (`^name`), arrays and insertion-ordered structs, checked integer arithmetic, integer bitwise operators (`bit-and`, `bit-or`, `bit-xor`, `bit-not`, `bit-shl`, `bit-shr`), formatting, restricted regex matching, loop control flow, and file-descriptor IO.
 
+Function arity belongs to each callable. User-defined functions are fixed-arity, while
+`add`, `mul`, `sub`, `div`, comparisons, and the three bitwise folds are variadic. There is no
+automatic currying.
+
+```lisp
+(add)             ; 0
+(add 1 2 3 4)     ; 10
+(mul 2 3 4)       ; 24
+(sub 10 3 2)      ; 5
+(div 20 2 2)      ; 5
+(bit-or 1 2 4)    ; 7
+```
+
 ## File IO
 
 `io/open` accepts `fopen`-style mode strings: `r`, `r+`, `w`, `w+`, `a`, and `a+`. It returns an integer file descriptor. `io/read` reads one UTF-8 line without its EOL and returns `_` at EOF; `io/write` writes a string and returns its byte count; `io/close` returns `t` when it closes an open descriptor and `f` otherwise.

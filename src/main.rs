@@ -1617,104 +1617,189 @@ fn numeric(v: Value) -> Result<(Option<i64>, f64), Flow> {
     }
 }
 fn builtin(name: &str, vs: Vec<Value>) -> Result<Value, Error> {
-    if [
-        "add", "sub", "mul", "div", "mod", "pow", "eq", "ne", "lt", "gt", "le", "ge", "bit-and",
-        "bit-or", "bit-xor", "bit-not", "bit-shl", "bit-shr",
-    ]
-    .contains(&name)
-        && vs.len() != if name == "bit-not" { 1 } else { 2 }
-    {
-        return Err(Error::Arity(format!(
-            "{name} expects {} arguments, got {}",
-            if name == "bit-not" { 1 } else { 2 },
-            vs.len()
-        )));
-    }
-    let a = vs[0].clone();
-    if name == "bit-not" {
-        return Ok(Value::Int(!integer_value(a)?));
-    }
-    let b = vs[1].clone();
-    if matches!(
-        name,
-        "bit-and" | "bit-or" | "bit-xor" | "bit-shl" | "bit-shr"
-    ) {
-        let x = integer_value(a)?;
-        let y = integer_value(b)?;
-        return match name {
-            "bit-and" => Ok(Value::Int(x & y)),
-            "bit-or" => Ok(Value::Int(x | y)),
-            "bit-xor" => Ok(Value::Int(x ^ y)),
-            "bit-shl" | "bit-shr" => {
-                if !(0..64).contains(&y) {
-                    return Err(Error::Math("InvalidShiftCount".into()));
+    match name {
+        "add" => fold_numeric(name, &vs, Value::Int(0), |x, y| x + y),
+        "mul" => fold_numeric(name, &vs, Value::Int(1), |x, y| x * y),
+        "sub" => {
+            require_at_least(name, vs.len(), 1)?;
+            if vs.len() == 1 {
+                return negate_numeric(vs[0].clone());
+            }
+            fold_numeric(name, &vs[1..], vs[0].clone(), |x, y| x - y)
+        }
+        "div" => {
+            require_at_least(name, vs.len(), 1)?;
+            if vs.len() == 1 {
+                let (_, value) = numeric(vs[0].clone()).map_err(flow_err)?;
+                if value == 0.0 {
+                    return Err(Error::Math("DivisionByZero".into()));
                 }
-                let shift = y as u32;
-                Ok(Value::Int(if name == "bit-shl" {
-                    x << shift
-                } else {
-                    x >> shift
-                }))
+                return Ok(Value::Float(1.0 / value));
             }
+            fold_numeric(name, &vs[1..], vs[0].clone(), |x, y| x / y)
+        }
+        "mod" | "pow" => {
+            require_exact(name, vs.len(), 2)?;
+            binary_numeric(name, vs[0].clone(), vs[1].clone())
+        }
+        "eq" | "ne" => {
+            let equal = vs.windows(2).all(|pair| equals(&pair[0], &pair[1]));
+            Ok(Value::Bool(if name == "eq" { equal } else { !equal }))
+        }
+        "lt" | "gt" | "le" | "ge" => {
+            let ordered = vs.windows(2).try_fold(true, |_, pair| {
+                let (_, left) = numeric(pair[0].clone()).map_err(flow_err)?;
+                let (_, right) = numeric(pair[1].clone()).map_err(flow_err)?;
+                Ok::<_, Error>(match name {
+                    "lt" => left < right,
+                    "gt" => left > right,
+                    "le" => left <= right,
+                    _ => left >= right,
+                })
+            })?;
+            Ok(Value::Bool(ordered))
+        }
+        "bit-and" | "bit-or" | "bit-xor" => {
+            let identity = match name {
+                "bit-and" => -1,
+                _ => 0,
+            };
+            let result = vs.iter().try_fold(identity, |acc, value| {
+                let value = integer_value(value.clone())?;
+                Ok::<_, Error>(match name {
+                    "bit-and" => acc & value,
+                    "bit-or" => acc | value,
+                    _ => acc ^ value,
+                })
+            })?;
+            Ok(Value::Int(result))
+        }
+        "bit-not" => {
+            require_exact(name, vs.len(), 1)?;
+            Ok(Value::Int(!integer_value(vs[0].clone())?))
+        }
+        "bit-shl" | "bit-shr" => {
+            require_exact(name, vs.len(), 2)?;
+            let x = integer_value(vs[0].clone())?;
+            let y = integer_value(vs[1].clone())?;
+            if !(0..64).contains(&y) {
+                return Err(Error::Math("InvalidShiftCount".into()));
+            }
+            let shift = y as u32;
+            Ok(Value::Int(if name == "bit-shl" {
+                x << shift
+            } else {
+                x >> shift
+            }))
+        }
+        _ => Err(Error::Name(format!("unknown builtin {name}"))),
+    }
+}
+
+fn require_exact(name: &str, actual: usize, expected: usize) -> Result<(), Error> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(Error::Arity(format!(
+            "{name} expects {expected} arguments, got {actual}"
+        )))
+    }
+}
+
+fn require_at_least(name: &str, actual: usize, minimum: usize) -> Result<(), Error> {
+    if actual >= minimum {
+        Ok(())
+    } else {
+        Err(Error::Arity(format!(
+            "{name} expects at least {minimum} argument{}, got {actual}",
+            if minimum == 1 { "" } else { "s" }
+        )))
+    }
+}
+
+fn negate_numeric(value: Value) -> Result<Value, Error> {
+    match value {
+        Value::Int(value) => value
+            .checked_neg()
+            .map(Value::Int)
+            .ok_or_else(|| Error::Math("IntegerOverflow".into())),
+        Value::Float(value) => Ok(Value::Float(-value)),
+        _ => Err(Error::Type("expected number".into())),
+    }
+}
+
+fn fold_numeric(
+    name: &str,
+    values: &[Value],
+    initial: Value,
+    operation: fn(f64, f64) -> f64,
+) -> Result<Value, Error> {
+    let mut result = initial;
+    for value in values {
+        result = binary_numeric_with_operation(name, result, value.clone(), operation)?;
+    }
+    Ok(result)
+}
+
+fn binary_numeric(name: &str, left: Value, right: Value) -> Result<Value, Error> {
+    binary_numeric_with_operation(
+        name,
+        left,
+        right,
+        match name {
+            "mod" => |x, y| x % y,
+            "pow" => |x, y| x.powf(y),
             _ => unreachable!(),
-        };
-    }
-    if matches!(name, "eq" | "ne") {
-        let x = equals(&a, &b);
-        return Ok(Value::Bool(if name == "eq" { x } else { !x }));
-    }
-    if matches!(name, "lt" | "gt" | "le" | "ge") {
-        let (_, x) = numeric(a).map_err(flow_err)?;
-        let (_, y) = numeric(b).map_err(flow_err)?;
-        return Ok(Value::Bool(match name {
-            "lt" => x < y,
-            "gt" => x > y,
-            "le" => x <= y,
-            _ => x >= y,
-        }));
-    }
-    let (ai, af) = numeric(a).map_err(flow_err)?;
-    let (bi, bf) = numeric(b).map_err(flow_err)?;
-    if name == "div" {
-        if let (Some(x), Some(y)) = (ai, bi) {
-            if y == 0 {
-                return Err(Error::Math("DivisionByZero".into()));
-            }
-            return Ok(Value::Int(x / y));
-        }
-        if bf == 0.0 {
-            return Err(Error::Math("DivisionByZero".into()));
-        }
-        return Ok(Value::Float(af / bf));
+        },
+    )
+}
+
+fn binary_numeric_with_operation(
+    name: &str,
+    left: Value,
+    right: Value,
+    operation: fn(f64, f64) -> f64,
+) -> Result<Value, Error> {
+    let (left_int, left_float) = numeric(left).map_err(flow_err)?;
+    let (right_int, right_float) = numeric(right).map_err(flow_err)?;
+    if name == "div" && right_float == 0.0 {
+        return Err(Error::Math("DivisionByZero".into()));
     }
     if name == "mod" {
-        let (Some(x), Some(y)) = (ai, bi) else {
+        let (Some(left), Some(right)) = (left_int, right_int) else {
             return Err(Error::Type("mod requires integers".into()));
         };
-        if y == 0 {
+        if right == 0 {
             return Err(Error::Math("DivisionByZero".into()));
         }
-        return Ok(Value::Int(x % y));
+        return Ok(Value::Int(left % right));
     }
-    if ai.is_none() || bi.is_none() {
-        return Ok(Value::Float(match name {
-            "add" => af + bf,
-            "sub" => af - bf,
-            "mul" => af * bf,
-            "pow" => af.powf(bf),
+    if name == "pow" && left_int.is_some() && right_int.is_some() {
+        return right_int
+            .and_then(|right| u32::try_from(right).ok())
+            .and_then(|right| left_int.unwrap().checked_pow(right))
+            .map(Value::Int)
+            .ok_or_else(|| Error::Math("IntegerOverflow".into()));
+    }
+    if left_int.is_some() && right_int.is_some() && name == "div" {
+        let left = left_int.unwrap();
+        let right = right_int.unwrap();
+        return Ok(Value::Int(left / right));
+    }
+    if left_int.is_some() && right_int.is_some() && matches!(name, "add" | "sub" | "mul") {
+        let left = left_int.unwrap();
+        let right = right_int.unwrap();
+        let result = match name {
+            "add" => left.checked_add(right),
+            "sub" => left.checked_sub(right),
+            "mul" => left.checked_mul(right),
             _ => unreachable!(),
-        }));
+        };
+        return result
+            .map(Value::Int)
+            .ok_or_else(|| Error::Math("IntegerOverflow".into()));
     }
-    let (x, y) = (ai.unwrap(), bi.unwrap());
-    let r = match name {
-        "add" => x.checked_add(y),
-        "sub" => x.checked_sub(y),
-        "mul" => x.checked_mul(y),
-        "pow" => x.checked_pow(y as u32),
-        _ => None,
-    };
-    r.map(Value::Int)
-        .ok_or_else(|| Error::Math("IntegerOverflow".into()))
+    Ok(Value::Float(operation(left_float, right_float)))
 }
 fn integer_value(v: Value) -> Result<i64, Error> {
     if let Value::Int(n) = v {
@@ -1865,6 +1950,60 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(value, Value::Int(123)));
+    }
+
+    #[test]
+    fn variadic_builtins_follow_their_declared_arities() {
+        let value = run("(expect (add) 0)
+             (expect (add 1 2 3 4) 10)
+             (expect (mul) 1)
+             (expect (mul 2 3 4) 24)
+             (expect (sub 10) -10)
+             (expect (sub 10 3 2) 5)
+             (expect (div 20) 0.05)
+             (expect (div 20 2 2) 5)
+             (expect (eq) t)
+             (expect (eq 1) t)
+             (expect (lt 1 2 3) t)
+             (expect (ge 3 2 2) t)
+             (expect (bit-and) -1)
+             (expect (bit-and 15 7 3) 3)
+             (expect (bit-or) 0)
+             (expect (bit-or 1 2 4) 7)
+             (expect (bit-xor 7 3 1) 5)")
+        .unwrap();
+        assert!(matches!(value, Value::Bool(true)));
+    }
+
+    #[test]
+    fn fixed_builtin_and_user_function_arities_remain_strict() {
+        for source in ["(mod 4)", "(mod 4 2 1)", "(pow 2)", "(bit-not 1 2)"] {
+            assert!(matches!(run(source), Err(Error::Arity(_))));
+        }
+        assert!(matches!(
+            run("(let sum (fn (x y) (add x y))) (sum 1)"),
+            Err(Error::Arity(_))
+        ));
+        assert!(matches!(
+            run("(let sum (fn (x y) (add x y))) (sum 1 2 3)"),
+            Err(Error::Arity(_))
+        ));
+    }
+
+    #[test]
+    fn variadic_folds_preserve_numeric_errors() {
+        assert!(matches!(
+            run("(add 1 2 9223372036854775807)"),
+            Err(Error::Math(message)) if message == "IntegerOverflow"
+        ));
+        assert!(matches!(
+            run("(div 20 2 0)"),
+            Err(Error::Math(message)) if message == "DivisionByZero"
+        ));
+        assert!(matches!(
+            run("(bit-or 1 2.0)"),
+            Err(Error::Type(message)) if message == "bitwise operations require integers"
+        ));
     }
 
     #[test]
