@@ -63,12 +63,12 @@ postfix-access := field-access ("[" selector "]")*
 (let user {"name":"Yvan"})
 (let n (^ user.name))
 (set n "Nouveau")
-(>1 ($ "%s" user.name))   ; "Nouveau"
+(io/write 1 ($ "%s" user.name))   ; "Nouveau"
 
 (let nums [1 2 3])
 (let push-zero (fn (a) (set a[1] 0)))
 (push-zero ^nums)
-(>1 ($ "%d" nums[1]))      ; 0 (mutation en place du tableau)
+(io/write 1 ($ "%d" nums[1]))      ; 0 (mutation en place du tableau)
 * eq déréférence transparemment : comparer une référence à une valeur compare les valeurs pointées, pas des adresses (le langage n'expose aucune notion d'identité de pointeur ailleurs).
 
 8. Arithmétique
@@ -98,22 +98,15 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 11. if / match
 * if sans else, prédicat faux → retourne _.
 * match : liste de paires prédicat expr. La première paire dont le prédicat est vrai détermine le résultat. t en tête de la dernière paire matche toujours → sert de vrai else :
-(match (eq x 0) (>1 "zero") (eq x 1) (>1 "un") t (>1 "Default"))
+(match (eq x 0) "zero" (eq x 1) "un" t "Default")
 * Aucune paire ne matche et pas de t final → MatchError: no predicate matched (fail-fast plutôt que null silencieux).
 
 12. loop / break / continue
 * break valeur fait évaluer la loop (ou le match) entière à valeur. break seul → _.
 * continue : uniquement valide dans une loop. Hors d'une loop → ContinueOutsideLoop. Ne prend pas de valeur.
-(let x 5)
-(let result
-  (loop
-    (if (eq x 0) (break "fini"))
-    ((>1 ($ "%d" x))(set x (sub x 1)))))
-; affiche 5 4 3 2 1, result vaut "fini"
 
-13. IO (< / >)
-* (< 0) : lit une ligne de stdin (newline stripé), retourne toujours une string. Lire depuis 1/2 → IOError.
-* (> flux valeur) : auto-stringifie valeur (int → décimal, float → décimal, bool → "true"/"false", _ → "") et écrit + \n sur 1 (stdout) ou 2 (stderr). Écrire sur 0 → IOError.
+13. IO
+
 
 14. Interpolation $
 * Specifiers : %d (integer), %f (float), %s (tout type, stringifié), %% (échappe un % littéral).
@@ -136,67 +129,4 @@ Pas de try/catch dans la spec → fail-fast : la première erreur stoppe le prog
 * Clés string uniquement.
 
 18. Implémentation
-Interpréteur tree-walking en Rust (parse → AST → eval récursif). Pas de bytecode/VM nécessaire vu l'usage scripting/IO du langage.
-
-19. Exemples
-; Scopes imbriqués
-(let x 10)
-((let x 20)(>1 ($ "%d" x)))   ; 20
-(>1 ($ "%d" x))                ; 10
-
-; Closure mutable
-(let counter 0)
-(let inc (fn () (set counter (add counter 1))))
-(inc)(inc)
-(>1 ($ "%d" counter))          ; 2
-
-; set _ = simple assignation à null
-(let x 5)
-(set x _)
-(>1 x)                          ; affiche "" (x vaut null)
-
-; Récursion
-(let fact (fn (n) (if (eq n 0) 1 (mul n (fact (sub n 1))))))
-(>1 ($ "%d" (fact 5)))         ; 120
-
-; Référence explicite
-(let incr (fn (n) (set n (add n 1))))
-(let y 5)
-(incr ^y)
-(>1 ($ "%d" y))                ; 6
-
-; Division auto-promue en float si non exacte
-(>1 ($ "%d" (div 10 2)))       ; 5 (integer)
-(>1 ($ "%d" (div 7 2)))        ; 3 (integer, truncation vers zéro)
-(>1 ($ "%d" (mod -7 2)))       ; -1 (signe du dividende, sémantique C/C++)
-
-; Référence sur tableau entier, mutation en place
-(let nums [1 2 3])
-(let push-zero (fn (a) (set a[1] 0)))
-(push-zero ^nums)
-(>1 ($ "%d" nums[1]))           ; 0
-
-; Struct + tableau
-(let user {"name":"Yvan" "tags":["dev" "lisp"]})
-(>1 ($ "%s" user.name))        ; Yvan
-
-; Loop avec valeur de retour
-(let x 5)
-(let result
-  (loop
-    (if (eq x 0) (break "fini"))
-    ((>1 ($ "%d" x))(set x (sub x 1)))))
-; 5 4 3 2 1, result = "fini"
-
-; match avec défaut explicite
-(let x 9)
-(match (eq x 0) (>1 "zero") (eq x 1) (>1 "un") t (>1 "Default"))
-; Default
-
-; Erreur d'arité
-(let add2 (fn (a b) (add a b)))
-(add2 1)                       ; ArityError
-
-; eq sur floats/fonctions
-(eq [1 2 3] [1 2 3])           ; t
-(eq (fn (x) x) (fn (x) x))     ; f (identité)
+Interpréteur tree-walking en Rust (parse → AST → eval récursif).
