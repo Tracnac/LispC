@@ -1,0 +1,193 @@
+Small Lisp — Spécification
+Langage Lisp minimal, interprété (tree-walking), pensé pour du scripting IO simple.
+1. Types
+Type	Notation	Rust interne
+string	"..." (échappement \n, \t, etc.)	String
+raw string	'...' (aucun échappement)	String
+bool	t / f	bool
+integer	[+-]?0[xbo]?N — décimal, 0x hex, 0b binaire, 0o octal	i64
+float	N.N	f64
+null	_	unit / None
+array	[e1 e2 ...] — hétérogène, imbricable	Vec<Value>
+struct	{"k1":v1 "k2":v2 ...} — clés string uniquement	IndexMap<String, Value> (ordre d'insertion préservé)
+* Indices 1-based partout où une position est utilisée (accès tableau, lecture de flux, etc.).
+* Virgules optionnelles dans [] et {} : traitées comme du whitespace si présentes.
+* Vérité (truthiness) : tout est vrai sauf 0 (integer), 0.0 (float), f, _.
+2. Identifiants
+Regex : [A-Za-z0-9_-]+, ASCII uniquement. Un identifiant ne peut pas commencer par un chiffre en pratique — le lexer doit essayer de parser un nombre en premier ; si ça échoue, il retombe sur un identifiant.
+3. Grammaire
+form        := call | block | array | struct | literal | field-access | ref
+call        := "(" symbol form* ")"
+block       := "(" form* ")"                      ; nouveau scope, retourne la dernière valeur
+array       := "[" form* "]"
+struct      := "{" (string ":" form)* "}"
+field-access:= identifier ("." identifier)*        ; sucre pour (. (. a b) c)
+ref         := "^" field-access                    ; référence/alias vers un emplacement
+* () est le seul constructeur de scope. if/match n'ouvrent un scope que si leur branche est elle-même un ().
+* . est l'unique forme d'accès à un champ (pas d'accès calculé struct.(expr)). L'indexation de tableau réutilise . avec un entier : arr.1.
+* . retourne une copie de la valeur (accès par valeur). ^ retourne une référence/alias vers l'emplacement (variable, champ de struct, élément de tableau) — voir §7.
+4. let / set
+* Les deux évaluent strictement leur expression valeur.
+* let crée toujours une nouvelle liaison dans le scope courant (le () englobant le plus proche).
+* set modifie une liaison existante, en remontant la chaîne de scopes jusqu'à la trouver. Erreur NameError si le nom n'existe nulle part.
+
+5. Scopes
+* Seul () introduit un nouveau scope lexical.
+* loop : un seul scope créé à l'entrée, réutilisé à chaque itération (pas de nouveau scope par tour) — nécessaire pour que (set x (sub x 1)) accumule d'un tour à l'autre.
+* fn : chaque appel crée un nouveau scope où les paramètres sont liés ; ce scope a pour parent le scope lexical où le fn a été défini (lexical scoping, pas dynamique).
+* Les closures capturent l'environnement par référence : set depuis une closure mute bien la variable extérieure. C'est ce qui permet la récursion (le nom se résout au moment de l'appel, pas de la définition) et les compteurs mutables.
+
+6. Fonctions
+* Arité fixe. Trop peu / trop d'arguments → ArityError à l'appel. Pas de varargs, pas de currying.
+* Passage d'argument par valeur par défaut (copie). Passer ^x fait de l'argument un alias de x : un set dans le corps de la fonction mute la variable de l'appelant.
+* Récursion native : le corps d'un fn n'est évalué qu'à l'appel, et la closure référence son environnement par pointeur — pas besoin de letrec.
+
+(let incr (fn (n) (set n (add n 1))))
+(let x 5)
+(incr ^x)   ; x devient 6 (référence)
+(incr x)    ; copie locale incrémentée, x reste 6
+
+7. Références (^)
+* ^identifier, ^struct.champ, ^arr.i, ou ^arr (le tableau entier) produisent un alias vers l'emplacement correspondant.
+* ^ sur un tableau entier est autorisé et permet la mutation en place dans une fonction — l'array passé par référence pointe vers la même structure sous-jacente que celle de l'appelant, toute mutation via des opérations sur ce paramètre (ajout, modification d'un élément, etc.) est visible côté appelant.
+* Usages : argument de fonction (mutation explicite, §6), ou liaison locale d'alias :
+(let user {"name":"Yvan"})
+(let n (^ user.name))
+(set n "Nouveau")
+(>1 ($ "%s" user.name))   ; "Nouveau"
+
+(let nums [1 2 3])
+(let push-zero (fn (a) (set a.1 0)))
+(push-zero ^nums)
+(>1 ($ "%d" nums.1))      ; 0 (mutation en place du tableau)
+* eq déréférence transparemment : comparer une référence à une valeur compare les valeurs pointées, pas des adresses (le langage n'expose aucune notion d'identité de pointeur ailleurs).
+
+8. Arithmétique
+* integer = i64 (signé), float = f64.
+* div entre deux integers retourne toujours un integer, avec troncature vers zéro (sémantique de division entière Rust/C). Donc div(10, 2) = 5 et div(7, 2) = 3. Une division avec au moins un float retourne un float.
+* mod : suit la sémantique C/C++ (troncature vers zéro, signe du résultat = signe du dividende) → mod(-7, 2) = -1.
+* Division/modulo par zéro → DivisionByZero.
+* Overflow sur add/sub/mul/pow/négation de i64::MIN → IntegerOverflow (arithmétique checked, jamais de wraparound silencieux).
+* Mix integer/float dans une opération arithmétique → promotion automatique en float. string/bool/null en arithmétique → TypeError.
+
+9. Coercions
+Contexte	Règle
+Arithmétique	int+int→int, float+float→float, int+float→float (promotion). div : int+int→int avec troncature vers zéro, sinon float. Autres types → TypeError.
+eq/ne	Comparaison numérique cross-type autorisée (5 == 5.0 → t). Types non numériques différents → f (jamais d'erreur).
+lt/gt/le/ge	Numérique uniquement, même règles de promotion que l'arithmétique. Types non numériques → TypeError.
+$ (%s)	Accepte tout type, stringification canonique.
+$ (%d/%f)	%d exige un integer, %f accepte float ou integer promu.
+Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
+
+10. eq par type
+* Tableaux : égalité structurelle profonde, ordre compte.
+* Structs : égalité structurelle profonde, ordre insignifiant (comparaison de map).
+* Fonctions : égalité par identité (même closure physique) — deux fn au code identique mais définis séparément → f.
+* Floats : comparaison IEEE 754, sans epsilon : NaN n'est égal à aucune valeur (y compris NaN), les zéros signés sont égaux (`0.0 == -0.0`), et les infinis sont égaux à eux-mêmes.
+* Références : déréférencées avant comparaison (§7).
+
+11. if / match
+* if sans else, prédicat faux → retourne _.
+* match : liste de paires prédicat expr. La première paire dont le prédicat est vrai détermine le résultat. t en tête de la dernière paire matche toujours → sert de vrai else :
+(match (eq x 0) (>1 "zero") (eq x 1) (>1 "un") t (>1 "Default"))
+* Aucune paire ne matche et pas de t final → MatchError: no predicate matched (fail-fast plutôt que null silencieux).
+
+12. loop / break / continue
+* break valeur fait évaluer la loop (ou le match) entière à valeur. break seul → _.
+* continue : uniquement valide dans une loop. Hors d'une loop → ContinueOutsideLoop. Ne prend pas de valeur.
+(let x 5)
+(let result
+  (loop
+    (if (eq x 0) (break "fini"))
+    ((>1 ($ "%d" x))(set x (sub x 1)))))
+; affiche 5 4 3 2 1, result vaut "fini"
+
+13. IO (< / >)
+* (< 0) : lit une ligne de stdin (newline stripé), retourne toujours une string. Lire depuis 1/2 → IOError.
+* (> flux valeur) : auto-stringifie valeur (int → décimal, float → décimal, bool → "true"/"false", _ → "") et écrit + \n sur 1 (stdout) ou 2 (stderr). Écrire sur 0 → IOError.
+
+14. Interpolation $
+* Specifiers : %d (integer), %f (float), %s (tout type, stringifié), %% (échappe un % littéral).
+* Le nombre de specifiers doit correspondre exactement au nombre d'arguments restants → FormatArityError sinon.
+* Mismatch de type sur un specifier → FormatTypeError.
+* Retourne une string.
+
+15. Regex ~
+* Sous-ensemble strict : ^ $ . * + ? — pas de groupes de capture, pas d'alternance |, pas de classes de caractères (sauf extension future explicite).
+* Syntaxe : (~ pattern valeur) → retourne un bool.
+* Pattern invalide → InvalidRegex (erreur runtime, jamais un f silencieux).
+
+16. Erreurs
+Catégories : ParseError, NameError, TypeError, ArityError, MathError (div/0, overflow), IOError, FormatError, InvalidRegex, DuplicateKeyError, MatchError, ContinueOutsideLoop.
+Pas de try/catch dans la spec → fail-fast : la première erreur stoppe le programme, message sur stderr, exit code non nul.
+
+17. Structs — détails
+* Ordre d'insertion préservé (IndexMap, pas HashMap).
+* Clés dupliquées à la construction → DuplicateKeyError (pas de "dernier gagne" silencieux).
+* Clés string uniquement.
+
+18. Implémentation
+Interpréteur tree-walking en Rust (parse → AST → eval récursif). Pas de bytecode/VM nécessaire vu l'usage scripting/IO du langage.
+
+19. Exemples
+; Scopes imbriqués
+(let x 10)
+((let x 20)(>1 ($ "%d" x)))   ; 20
+(>1 ($ "%d" x))                ; 10
+
+; Closure mutable
+(let counter 0)
+(let inc (fn () (set counter (add counter 1))))
+(inc)(inc)
+(>1 ($ "%d" counter))          ; 2
+
+; set _ = simple assignation à null
+(let x 5)
+(set x _)
+(>1 x)                          ; affiche "" (x vaut null)
+
+; Récursion
+(let fact (fn (n) (if (eq n 0) 1 (mul n (fact (sub n 1))))))
+(>1 ($ "%d" (fact 5)))         ; 120
+
+; Référence explicite
+(let incr (fn (n) (set n (add n 1))))
+(let y 5)
+(incr ^y)
+(>1 ($ "%d" y))                ; 6
+
+; Division auto-promue en float si non exacte
+(>1 ($ "%d" (div 10 2)))       ; 5 (integer)
+(>1 ($ "%d" (div 7 2)))        ; 3 (integer, truncation vers zéro)
+(>1 ($ "%d" (mod -7 2)))       ; -1 (signe du dividende, sémantique C/C++)
+
+; Référence sur tableau entier, mutation en place
+(let nums [1 2 3])
+(let push-zero (fn (a) (set a.1 0)))
+(push-zero ^nums)
+(>1 ($ "%d" nums.1))           ; 0
+
+; Struct + tableau
+(let user {"name":"Yvan" "tags":["dev" "lisp"]})
+(>1 ($ "%s" user.name))        ; Yvan
+
+; Loop avec valeur de retour
+(let x 5)
+(let result
+  (loop
+    (if (eq x 0) (break "fini"))
+    ((>1 ($ "%d" x))(set x (sub x 1)))))
+; 5 4 3 2 1, result = "fini"
+
+; match avec défaut explicite
+(let x 9)
+(match (eq x 0) (>1 "zero") (eq x 1) (>1 "un") t (>1 "Default"))
+; Default
+
+; Erreur d'arité
+(let add2 (fn (a b) (add a b)))
+(add2 1)                       ; ArityError
+
+; eq sur floats/fonctions
+(eq [1 2 3] [1 2 3])           ; t
+(eq (fn (x) x) (fn (x) x))     ; f (identité)
