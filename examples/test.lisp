@@ -212,7 +212,7 @@
   (eq {"a":[1 2]} {"a":[2 1]})
   f
   "Deep array order matters")
-  
+
 ; Function
 (expect ($ "%t:%s" (fn (x) x) (fn (x) x)) "function:<fn>")
 ; Reference
@@ -699,3 +699,327 @@
 (expect result "outer")
 (expect outer 3)
 (expect inner 1)
+
+
+; ============================================================
+; Variadic builtins
+; ============================================================
+
+; ------------------------------------------------------------
+; ADD — 0+
+; ------------------------------------------------------------
+
+(expect (add) 0 "add: empty")
+(expect (add 1) 1 "add: one")
+(expect (add 1 2) 3 "add: two")
+(expect (add 1 2 3 4) 10 "add: many")
+
+(expect (add -1 2 -3 4) 2 "add: negative integers")
+
+(expect ($ "%t:%s" (add 1 2.5) (add 1 2.5))
+        "float:3.5"
+        "add: integer/float promotion")
+
+; Overflow during fold
+; (expect-error (add 9223372036854775807 1 2) IntegerOverflow)
+
+
+; ------------------------------------------------------------
+; MUL — 0+
+; ------------------------------------------------------------
+
+(expect (mul) 1 "mul: empty")
+(expect (mul 2) 2 "mul: one")
+(expect (mul 2 3) 6 "mul: two")
+(expect (mul 2 3 4) 24 "mul: many")
+
+(expect (mul -2 3 -4) 24 "mul: negative integers")
+
+(expect ($ "%t:%s" (mul 2 2.5) (mul 2 2.5))
+        "float:5"
+        "mul: integer/float promotion")
+
+
+; ------------------------------------------------------------
+; SUB — 1+
+; ------------------------------------------------------------
+
+(expect (sub 5) -5 "sub: unary")
+(expect (sub 10 3) 7 "sub: two")
+(expect (sub 10 3 2) 5 "sub: left fold")
+(expect (sub 20 5 3 2) 10 "sub: many")
+
+(expect ($ "%t:%s" (sub 10 2.5) (sub 10 2.5))
+        "float:7.5"
+        "sub: integer/float promotion")
+
+
+; ------------------------------------------------------------
+; DIV — 1+
+; ------------------------------------------------------------
+
+(expect ($ "%t:%s" (div 10) (div 10))
+        "float:0.1"
+        "div: unary reciprocal")
+
+(expect ($ "%t:%s" (div 2.5) (div 2.5))
+        "float:0.4"
+        "div: unary reciprocal float")
+
+(expect ($ "%t:%s" (div 10 2) (div 10 2))
+        "int:5"
+        "div: integer division")
+
+(expect ($ "%t:%s" (div 10 2 5) (div 10 2 5))
+        "int:1"
+        "div: left fold")
+
+(expect ($ "%t:%s" (div 10 2 4) (div 10 2 4))
+        "int:1"
+        "div: promotion during fold")
+
+
+; ------------------------------------------------------------
+; EQ — 0+
+; ------------------------------------------------------------
+
+(expect (eq) t "eq: empty")
+(expect (eq 1) t "eq: one")
+(expect (eq 1 1) t "eq: two")
+(expect (eq 1 1 1) t "eq: all equal")
+(expect (eq 1 1 2) f "eq: one differs")
+
+(expect (eq 5 5.0) t "eq: integer/float")
+
+(expect (eq [1 2] [1 2]) t "eq: arrays")
+(expect (eq [1 2] [2 1]) f "eq: array order")
+
+(expect (eq {"a":1 "b":2} {"b":2 "a":1})
+        t
+        "eq: struct key order")
+
+
+; ------------------------------------------------------------
+; NE — 0+
+; ------------------------------------------------------------
+
+(expect (ne) t "ne: empty")
+(expect (ne 1) t "ne: one")
+(expect (ne 1 2) t "ne: different")
+(expect (ne 1 2 3) t "ne: all different")
+(expect (ne 1 2 1) f "ne: repeated value")
+
+
+; ------------------------------------------------------------
+; LT — chained
+; ------------------------------------------------------------
+
+(expect (lt) t "lt: empty")
+(expect (lt 1) t "lt: one")
+(expect (lt 1 2) t "lt: two")
+(expect (lt 1 2 3) t "lt: increasing")
+(expect (lt 1 2 3 4 5) t "lt: increasing many")
+(expect (lt 1 3 2) f "lt: not increasing")
+(expect (lt 1 2 2) f "lt: equal adjacent")
+
+; Mixed numeric types
+(expect (lt 1 2.0 3) t "lt: mixed numeric types")
+
+
+; ------------------------------------------------------------
+; GT — chained
+; ------------------------------------------------------------
+
+(expect (gt) t "gt: empty")
+(expect (gt 5) t "gt: one")
+(expect (gt 3 2) t "gt: two")
+(expect (gt 5 4 3 2 1) t "gt: decreasing")
+(expect (gt 5 4 4) f "gt: equal adjacent")
+(expect (gt 5 3 4) f "gt: not decreasing")
+
+
+; ------------------------------------------------------------
+; LE — chained
+; ------------------------------------------------------------
+
+(expect (le) t "le: empty")
+(expect (le 1) t "le: one")
+(expect (le 1 2) t "le: increasing")
+(expect (le 1 2 2 3) t "le: equal allowed")
+(expect (le 1 2 1) f "le: violation")
+
+
+; ------------------------------------------------------------
+; GE — chained
+; ------------------------------------------------------------
+
+(expect (ge) t "ge: empty")
+(expect (ge 3) t "ge: one")
+(expect (ge 3 2 2 1) t "ge: equal allowed")
+(expect (ge 3 2 4) f "ge: violation")
+
+
+; ------------------------------------------------------------
+; NaN / Infinity
+; ------------------------------------------------------------
+
+(expect (eq Inf Inf) t "eq: Inf")
+(expect (eq -Inf -Inf) t "eq: -Inf")
+(expect (eq NaN NaN) f "eq: NaN")
+
+(expect (lt 1.0 Inf) t "lt: Inf")
+(expect (gt -Inf 1.0) f "gt: -Inf")
+
+(expect (lt NaN 1.0) f "lt: NaN")
+(expect (gt NaN 1.0) f "gt: NaN")
+(expect (le NaN 1.0) f "le: NaN")
+(expect (ge NaN 1.0) f "ge: NaN")
+
+
+; ------------------------------------------------------------
+; MOD — exactly 2
+; ------------------------------------------------------------
+
+(expect (mod 7 2) 1 "mod")
+
+; Expected errors:
+; (expect-error (mod) ArityError)
+; (expect-error (mod 7) ArityError)
+; (expect-error (mod 7 2 1) ArityError)
+
+
+; ------------------------------------------------------------
+; POW — exactly 2
+; ------------------------------------------------------------
+
+(expect (pow 2 10) 1024 "pow")
+
+; Expected errors:
+; (expect-error (pow) ArityError)
+; (expect-error (pow 2) ArityError)
+; (expect-error (pow 2 3 4) ArityError)
+
+
+; ------------------------------------------------------------
+; BIT-AND — 0+
+; ------------------------------------------------------------
+
+(expect (bit-and) -1 "bit-and: identity")
+(expect (bit-and 7) 7 "bit-and: one")
+(expect (bit-and 7 3) 3 "bit-and: two")
+(expect (bit-and 7 3 1) 1 "bit-and: many")
+
+
+; ------------------------------------------------------------
+; BIT-OR — 0+
+; ------------------------------------------------------------
+
+(expect (bit-or) 0 "bit-or: identity")
+(expect (bit-or 7) 7 "bit-or: one")
+(expect (bit-or 1 2 4) 7 "bit-or: many")
+
+
+; ------------------------------------------------------------
+; BIT-XOR — 0+
+; ------------------------------------------------------------
+
+(expect (bit-xor) 0 "bit-xor: identity")
+(expect (bit-xor 7) 7 "bit-xor: one")
+(expect (bit-xor 7 3 1) 5 "bit-xor: many")
+(expect (bit-xor 7 7) 0 "bit-xor: cancellation")
+
+
+; ------------------------------------------------------------
+; BIT-NOT — exactly 1
+; ------------------------------------------------------------
+
+(expect (bit-not 0) -1 "bit-not")
+(expect (bit-not 5) -6 "bit-not")
+(expect (bit-not -1) 0 "bit-not: negative")
+
+; Expected errors:
+; (expect-error (bit-not) ArityError)
+; (expect-error (bit-not 1 2) ArityError)
+
+
+; ============================================================
+; User-defined functions remain fixed-arity
+; ============================================================
+
+(let sum-two
+  (fn (a b)
+    (add a b)))
+
+(expect (sum-two 1 2) 3 "user fn: normal call")
+
+; Expected errors:
+; (expect-error (sum-two 1) ArityError)
+; (expect-error (sum-two 1 2 3) ArityError)
+
+
+; ============================================================
+; Nested / late errors during variadic folds
+; ============================================================
+
+; These are particularly important because the error happens
+; after earlier operands have already been processed.
+
+; (expect-error
+;   (add 1 2 9223372036854775807 1)
+;   IntegerOverflow)
+
+; (expect-error
+;   (mul 1 2 4611686018427387904 3)
+;   IntegerOverflow)
+
+; (expect-error
+;   (div 100 5 0)
+;   DivisionByZero)
+
+; (expect-error
+;   (mod 10 0)
+;   DivisionByZero)
+
+
+; ============================================================
+; Evaluation happens exactly once and left-to-right
+; ============================================================
+
+(let x 0)
+(let record
+  (fn (value)
+    ((set x value) value)))
+
+(add
+  (record 1)
+  (record 2)
+  (record 3))
+
+(expect x 3 "variadic args: left-to-right")
+
+
+; ============================================================
+; Existing 2-argument behavior remains unchanged
+; ============================================================
+
+(expect (add 2 3) 5 "add: existing")
+(expect (sub 10 3) 7 "sub: existing")
+(expect (mul 6 7) 42 "mul: existing")
+
+(expect ($ "%t:%s" (div 10 2) (div 10 2))
+        "int:5"
+        "div: existing")
+
+(expect ($ "%t:%s" (div 7 2) (div 7 2))
+        "int:3"
+        "div: existing integer division")
+
+(expect (mod -7 2) -1 "mod: existing")
+(expect (pow 2 10) 1024 "pow: existing")
+
+(expect (eq 5 5.0) t "eq: existing mixed numeric")
+(expect (ne 5 6) t "ne: existing")
+(expect (lt 2 3) t "lt: existing")
+(expect (gt 3 2) t "gt: existing")
+(expect (le 3 3) t "le: existing")
+(expect (ge 3 3) t "ge: existing")

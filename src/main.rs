@@ -360,6 +360,15 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
             })
         }
     }
+    let byte_offsets: Vec<usize> = src
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(src.len()))
+        .collect();
+    for token in &mut out {
+        token.span.start = byte_offsets[token.span.start];
+        token.span.end = byte_offsets[token.span.end];
+    }
     Ok(out)
 }
 fn number(s: &str) -> Result<Option<TokKind>, Error> {
@@ -1644,7 +1653,9 @@ fn builtin(name: &str, vs: Vec<Value>) -> Result<Value, Error> {
         }
         "eq" | "ne" => {
             let equal = vs.windows(2).all(|pair| equals(&pair[0], &pair[1]));
-            Ok(Value::Bool(if name == "eq" { equal } else { !equal }))
+            let distinct = (0..vs.len())
+                .all(|index| ((index + 1)..vs.len()).all(|other| !equals(&vs[index], &vs[other])));
+            Ok(Value::Bool(if name == "eq" { equal } else { distinct }))
         }
         "lt" | "gt" | "le" | "ge" => {
             let ordered = vs.windows(2).try_fold(true, |_, pair| {
@@ -1964,6 +1975,10 @@ mod tests {
              (expect (div 20 2 2) 5)
              (expect (eq) t)
              (expect (eq 1) t)
+             (expect (ne) t)
+             (expect (ne 1) t)
+             (expect (ne 1 2 1) f)
+             (expect (ne 1 2 3) t)
              (expect (lt 1 2 3) t)
              (expect (ge 3 2 2) t)
              (expect (bit-and) -1)
@@ -2221,6 +2236,20 @@ mod tests {
         assert!(rendered.starts_with("sample.lisp:2:"));
         assert!(rendered.contains("(div x 0)"));
         assert!(rendered.contains("^"));
+    }
+
+    #[test]
+    fn diagnostics_use_byte_offsets_after_unicode_source() {
+        let source = "; section — variadic functions\n(let value 1)\n(div value 0)";
+        let error = match run(source) {
+            Err(error) => error,
+            Ok(_) => panic!("expected division by zero"),
+        };
+        let span = LAST_ERROR_SPAN.with(|span| *span.borrow());
+        let rendered = diagnostic(&error, source, "unicode.lisp", span);
+        assert!(rendered.starts_with("unicode.lisp:3:"));
+        assert!(rendered.contains("(div value 0)"));
+        assert!(!rendered.contains("; section"));
     }
 
     #[test]

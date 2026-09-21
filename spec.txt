@@ -10,7 +10,7 @@ integer	[+-]?0[xbo]?N — décimal, 0x hex, 0b binaire, 0o octal	i64
 float	N.N	f64
 null	_	unit / None
 array	[e1 e2 ...] — hétérogène, imbricable	Vec<Value>
-struct	{"k1":v1 "k2":v2 ...} — clés string uniquement	IndexMap<String, Value> (ordre d'insertion préservé)
+struct	{"k1":v1 "k2":v2 ...} — clés string uniquement	Vec<(String, Value)> (ordre d'insertion préservé)
 * Les indices de tableau sont 1-based : arr[1] est le premier élément et arr[-1] le dernier.
 * Les sélections de tableau sont inclusives : arr[start..end], avec une borne omise
   autorisée (arr[..end], arr[start..]), et arr[[i j]] sélectionne plusieurs éléments.
@@ -20,6 +20,27 @@ struct	{"k1":v1 "k2":v2 ...} — clés string uniquement	IndexMap<String, Value>
 
 2. Identifiants
 Regex : [A-Za-z0-9_-]+, ASCII uniquement. Un identifiant ne peut pas commencer par un chiffre en pratique — le lexer doit essayer de parser un nombre en premier ; si ça échoue, il retombe sur un identifiant.
+Les symboles `t`, `f`, `_`, `NaN`, `Inf` et `-Inf` sont des littéraux réservés et ne peuvent pas être utilisés comme noms de liaison.
+
+2.1 Mots-clés et noms intégrés
+* Le lexer ne produit pas de token spécial pour les mots-clés : ils sont lexés comme des
+  symboles puis reconnus lorsqu'ils apparaissent en tête d'un appel.
+* Les formes spéciales sont : `let`, `set`, `if`, `fn`, `loop`, `break`, `continue`, `match`,
+  `and`, `or`, `not` et `expect`. Elles contrôlent l'évaluation de leurs arguments ; leurs
+  arguments ne sont donc pas nécessairement tous évalués avant l'appel.
+* Les builtins stricts sont : `add`, `sub`, `mul`, `div`, `mod`, `pow`, `eq`, `ne`, `lt`, `gt`,
+  `le`, `ge`, `bit-and`, `bit-or`, `bit-xor`, `bit-not`, `bit-shl` et `bit-shr`. Leurs
+  arguments sont évalués puis l'opération est appliquée selon les règles d'arité de §6 et de
+  typage de §8–§10.
+* Les builtins d'interaction sont : `io/open`, `io/read`, `io/write`, `io/close`, `$` et `~`.
+  `$` effectue l'interpolation décrite en §14 et `~` la correspondance décrite en §15.
+* Ces noms sont reconnus par leur orthographe exacte lorsqu'ils sont en tête d'un appel.
+  Une liaison portant le même nom ne remplace donc pas ce builtin dans cette position. Les
+  noms peuvent toutefois être utilisés comme noms de liaison dans les autres contextes,
+  sous réserve des littéraux réservés ci-dessus.
+* Les noms `io/open`, `io/read`, `io/write` et `io/close` contiennent `/` et constituent des
+  symboles intégrés malgré la règle générale des identifiants ; ils ne sont pas des accès de
+  champ.
 
 3. Grammaire
 form        := call | block | array | struct | literal | field-access | ref
@@ -30,6 +51,7 @@ struct      := "{" (string ":" form)* "}"
 field-access:= identifier ("." identifier)*        ; sucre pour (. (. a b) c)
 ref        := "^" postfix-access                  ; référence/alias vers un emplacement
 postfix-access := field-access ("[" selector "]")*
+
 * () est le seul constructeur de scope. if/match n'ouvrent un scope que si leur branche est elle-même un ().
 * . est l'unique forme d'accès à un champ struct. Les tableaux utilisent exclusivement les crochets : arr[1], arr[-1], arr[2..5], arr[[1 3]].
 * . retourne une copie de la valeur (accès par valeur). ^ retourne une référence/alias vers l'emplacement (variable, champ de struct, élément de tableau) — voir §7.
@@ -52,8 +74,9 @@ postfix-access := field-access ("[" selector "]")*
 * `add` et `mul` acceptent zéro argument (identités 0 et 1) et un nombre quelconque d'arguments.
   `sub` et `div` acceptent au moins un argument et effectuent un pliage gauche ; `sub` unaire
   est la négation et `div` unaire est le réciproque (Float).
-* `eq`, `ne`, `lt`, `gt`, `le` et `ge` acceptent zéro argument ou plus. Les comparaisons
-  multiples sont chaînées ; avec zéro ou un argument, le résultat est vrai.
+* `eq`, `ne`, `lt`, `gt`, `le` et `ge` acceptent zéro argument ou plus. `eq` et les
+  comparaisons d'ordre sont chaînées ; `ne` vérifie que toutes les valeurs sont distinctes
+  ; avec zéro ou un argument, le résultat est vrai.
 * `mod` et `pow` exigent exactement deux arguments. `bit-and`, `bit-or` et `bit-xor` sont
   variadiques (identités -1, 0 et 0) ; `bit-not` exige exactement un argument. `bit-shl` et
   `bit-shr` exigent exactement deux arguments.
@@ -67,7 +90,9 @@ postfix-access := field-access ("[" selector "]")*
 (incr x)    ; copie locale incrémentée, x reste 6
 
 7. Références (^)
-* ^identifier, ^struct.champ, ^arr.i, ou ^arr (le tableau entier) produisent un alias vers l'emplacement correspondant.
+* ^identifier, ^struct.champ, ^arr[i], ou ^arr (le tableau entier) produisent un alias vers l'emplacement correspondant.
+  Les sélections multiples (`^arr[[i j]]`) et les tranches (`^arr[start..end]`) ne peuvent pas
+  être des cibles de référence.
 * ^ sur un tableau entier est autorisé et permet la mutation en place dans une fonction — l'array passé par référence pointe vers la même structure sous-jacente que celle de l'appelant, toute mutation via des opérations sur ce paramètre (ajout, modification d'un élément, etc.) est visible côté appelant.
 * Usages : argument de fonction (mutation explicite, §6), ou liaison locale d'alias :
 (let user {"name":"Yvan"})
@@ -84,18 +109,27 @@ postfix-access := field-access ("[" selector "]")*
 8. Arithmétique
 * integer = i64 (signé), float = f64.
 * div entre deux integers retourne toujours un integer, avec troncature vers zéro (sémantique de division entière Rust/C). Donc div(10, 2) = 5 et div(7, 2) = 3. Une division avec au moins un float retourne un float.
+* `sub` unaire effectue la négation. `div` unaire retourne le réciproque en Float ; `div(0)`
+  produit DivisionByZero.
 * mod : suit la sémantique C/C++ (troncature vers zéro, signe du résultat = signe du dividende) → mod(-7, 2) = -1.
 * Division/modulo par zéro → DivisionByZero.
 * Overflow sur add/sub/mul/pow/négation de i64::MIN → IntegerOverflow (arithmétique checked, jamais de wraparound silencieux).
 * Mix integer/float dans une opération arithmétique → promotion automatique en float. string/bool/null en arithmétique → TypeError.
+* Les opérations bitwise (`bit-and`, `bit-or`, `bit-xor`, `bit-not`, `bit-shl`, `bit-shr`)
+  exigent des entiers. `bit-and`, `bit-or` et `bit-xor` sont des plis variadiques, avec
+  identités respectives -1, 0 et 0. `bit-not`, `bit-shl` et `bit-shr` restent à arité fixe ;
+  les décalages exigent un compte entre 0 et 63.
 
 9. Coercions
 Contexte	Règle
 Arithmétique	int+int→int, float+float→float, int+float→float (promotion). div : int+int→int avec troncature vers zéro, sinon float. Autres types → TypeError.
 eq/ne	Comparaison numérique cross-type autorisée (5 == 5.0 → t). Types non numériques différents → f (jamais d'erreur).
 lt/gt/le/ge	Numérique uniquement, même règles de promotion que l'arithmétique. Types non numériques → TypeError.
-$ (%s)	Accepte tout type, stringification canonique.
+$ (%s)	Accepte tout type, stringification canonique (les clés de struct ne sont pas entourées de guillemets).
 $ (%d/%f)	%d exige un integer, %f accepte float ou integer promu.
+$ (%b/%h/%o)	Formats binaire, hexadécimal et octal ; `%8b`, `%16b`, `%32b` et `%64b`
+		sont les formats binaires à largeur fixe.
+$ (%j/%t/%v)	JSON, nom du type et représentation structurelle de debug.
 Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 
 10. eq par type
@@ -116,25 +150,82 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 * continue : uniquement valide dans une loop. Hors d'une loop → ContinueOutsideLoop. Ne prend pas de valeur.
 
 13. IO
-
+* `io/open` ouvre un fichier et retourne un descripteur entier. Modes supportés : `r`, `r+`,
+  `w`, `w+`, `a` et `a+`. Les descripteurs 0, 1 et 2 correspondent respectivement à stdin,
+  stdout et stderr ; les fichiers ouverts reçoivent des descripteurs à partir de 3.
+* `io/read fd` lit une ligne sans son retour à la ligne et retourne une string ; à EOF, retourne
+  `_`. Les descripteurs non lisibles et invalides produisent IOError.
+* `io/write fd valeur` écrit une string et retourne le nombre d'octets écrits. Les descripteurs
+  non inscriptibles et invalides produisent IOError.
+* `io/close fd` ferme un descripteur et retourne `t` s'il était ouvert, sinon `f`.
+* Les erreurs de système de fichiers et les entrées UTF-8 invalides produisent IOError.
 
 14. Interpolation $
-* Specifiers : %d (integer), %f (float), %s (tout type, stringifié), %% (échappe un % littéral).
-* Le nombre de specifiers doit correspondre exactement au nombre d'arguments restants → FormatArityError sinon.
-* Mismatch de type sur un specifier → FormatTypeError.
-* Retourne une string.
+* Syntaxe : `($ format arguments...)`. Le premier argument doit être une string ; les arguments
+  suivants sont consommés dans l'ordre par les spécificateurs.
+* `%s` accepte tout type et produit la stringification canonique. Les strings utilisées comme
+  valeurs imbriquées dans les arrays et structs sont entourées de guillemets ; les clés de struct
+  ne le sont pas.
+* `%d` exige un integer et produit son écriture décimale signée.
+* `%b` exige un integer et produit son écriture binaire sans largeur imposée.
+* `%8b`, `%16b`, `%32b` et `%64b` exigent un integer et produisent une écriture binaire
+  à largeur fixe. Les valeurs négatives utilisent leur représentation en complément à deux,
+  tronquée à la largeur demandée.
+* `%h` exige un integer et produit son écriture hexadécimale minuscule, sans préfixe `0x`.
+* `%o` exige un integer et produit son écriture octale, sans préfixe `0o`.
+* `%f` accepte un integer ou un float et produit une valeur numérique rendue en Float.
+* `%j` accepte les valeurs sérialisables en JSON et produit une string JSON compacte :
+  `_` devient `null`, `t`/`f` deviennent `true`/`false`, les structs ont des clés
+  entourées de guillemets. Les fonctions ne sont pas sérialisables et les Float `NaN`,
+  `Inf` et `-Inf` sont refusés.
+* `%t` accepte tout type et produit son nom de type (`null`, `bool`, `int`, `float`, `string`,
+  `array`, `struct`, `function` ou `ref`).
+* `%v` accepte tout type et produit sa représentation structurelle de debug (`Array(...)`,
+  `Struct(...)`, `Int(...)`, etc.).
+* `%%` produit un caractère `%` littéral et ne consomme aucun argument.
+* Un `%` final, un spécificateur inconnu ou une largeur binaire autre que 8, 16, 32 ou 64
+  produit une FormatError.
+* Le nombre de spécificateurs consommant un argument doit correspondre exactement au nombre
+  d'arguments restants → `FormatArityError` sinon.
+* Un type incompatible avec `%d`, `%b`, `%h`, `%o`, `%f` ou `%j` produit une `FormatError`
+  avec un sous-message `FormatTypeError`.
+* Le résultat de `$` est toujours une string.
 
 15. Regex ~
-* Sous-ensemble strict : ^ $ . * + ? — pas de groupes de capture, pas d'alternance |, pas de classes de caractères (sauf extension future explicite).
-* Syntaxe : (~ pattern valeur) → retourne un bool.
-* Pattern invalide → InvalidRegex (erreur runtime, jamais un f silencieux).
+* Syntaxe : `(~ pattern valeur)` → retourne un bool. `pattern` et `valeur` doivent être des
+  strings ; une valeur d'un autre type produit TypeError.
+* Le moteur est un sous-ensemble volontairement strict, sans dépendance externe. Les caractères
+  ordinaires correspondent au même caractère Unicode dans le texte.
+* `.` correspond à n'importe quel caractère.
+* `*` placé après un caractère ou `.` correspond à zéro ou plusieurs occurrences de cet élément.
+* `+` placé après un caractère ou `.` correspond à une ou plusieurs occurrences de cet élément.
+* `?` placé après un caractère ou `.` correspond à zéro ou une occurrence de cet élément.
+* `^` au début du pattern impose le début du texte. `$` à la fin du pattern impose la fin du
+  texte. Sans `^` ou `$`, la recherche peut réussir sur n'importe quelle sous-chaîne.
+* Les quantificateurs s'appliquent uniquement à l'élément immédiatement précédent. Les patterns
+  sont évalués avec retour arrière lorsque plusieurs longueurs sont possibles.
+* Le pattern vide correspond toujours ; `^` et `$` seuls peuvent donc aussi correspondre au
+  texte vide ou à une position appropriée.
+* Les groupes `(...)`, l'alternance `|`, les classes `[...]`, les échappements `\` et les autres
+  constructions de regex ne sont pas supportés.
+* Les quantificateurs sans élément précédent, les ancres `^`/`$` utilisées au milieu du pattern
+  et les autres séquences syntaxiquement non reconnues ne correspondent pas.
+* Les constructions explicitement interdites (`(`, `)`, `[`, `]`, `|`, `\`) produisent
+  InvalidRegex. Un pattern refusé ne devient jamais un `f` silencieux.
 
 16. Erreurs
-Catégories : ParseError, NameError, TypeError, ArityError, MathError (div/0, overflow), IOError, FormatError, InvalidRegex, DuplicateKeyError, MatchError, ContinueOutsideLoop.
+Catégories : ParseError, NameError, TypeError, ArityError, MathError (div/0, overflow), IOError,
+FormatError, InvalidRegex, DuplicateKeyError, MatchError, ContinueOutsideLoop,
+BreakOutsideLoopOrMatch et Interrupted.
+Les erreurs de formatage conservent les sous-messages `FormatArityError` et `FormatTypeError`.
 Pas de try/catch dans la spec → fail-fast : la première erreur stoppe le programme, message sur stderr, exit code non nul.
+Les erreurs de parsing et d'exécution affichent le fichier, la ligne, la colonne, la ligne source
+et un curseur `^`. Les erreurs qui traversent des fonctions utilisateur affichent aussi une trace
+d'appel avec le nom de chaque fonction, ou `<anonymous function>`.
+Sur Unix, Ctrl-C est converti en `Interrupted` et pointe vers l'expression en cours d'évaluation.
 
 17. Structs — détails
-* Ordre d'insertion préservé (IndexMap, pas HashMap).
+* Ordre d'insertion préservé.
 * Clés dupliquées à la construction → DuplicateKeyError (pas de "dernier gagne" silencieux).
 * Clés string uniquement.
 

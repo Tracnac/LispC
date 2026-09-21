@@ -3,4 +3,8 @@
 
 
 
-(add 1 1 2 3 4)
+(expect (ne) t "ne: empty")
+(expect (ne 1) t "ne: one")
+(expect (ne 1 2) t "ne: different")
+(expect (ne 1 2 3) t "ne: all different")
+(expect (ne 1 2 1) f "ne: repeated value")
