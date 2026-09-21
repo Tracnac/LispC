@@ -1023,3 +1023,10 @@
 (expect (gt 3 2) t "gt: existing")
 (expect (le 3 3) t "le: existing")
 (expect (ge 3 3) t "ge: existing")
+
+
+; REGEX
+
+(let match "old")
+(expect (~ "xxx" "hello" match) f)
+(expect match "old")

@@ -15,6 +15,10 @@ struct	{"k1":v1 "k2":v2 ...} — clés string uniquement	Vec<(String, Value)> (o
 * Les sélections de tableau sont inclusives : arr[start..end], avec une borne omise
   autorisée (arr[..end], arr[start..]), et arr[[i j]] sélectionne plusieurs éléments.
 * Les sélections retournent une nouvelle valeur array.
+* Les chaînes utilisent la même indexation 1-based, les indices négatifs et les tranches
+  inclusives : str[1] retourne un string, str[start..end] retourne un string, et
+  str[[i j]] retourne un array de strings. Les positions sont des graphèmes Unicode
+  (pas des octets ni des scalaires Unicode).
 * Virgules optionnelles dans [] et {} : traitées comme du whitespace si présentes.
 * Vérité (truthiness) : tout est vrai sauf 0 (integer), 0.0 (float), f, _.
 
@@ -32,8 +36,9 @@ Les symboles `t`, `f`, `_`, `NaN`, `Inf` et `-Inf` sont des littéraux réservé
   `le`, `ge`, `bit-and`, `bit-or`, `bit-xor`, `bit-not`, `bit-shl` et `bit-shr`. Leurs
   arguments sont évalués puis l'opération est appliquée selon les règles d'arité de §6 et de
   typage de §8–§10.
-* Les builtins d'interaction sont : `io/open`, `io/read`, `io/write`, `io/close`, `$` et `~`.
-  `$` effectue l'interpolation décrite en §14 et `~` la correspondance décrite en §15.
+* Les builtins d'interaction sont : `io/open`, `io/read`, `io/write`, `io/close`, `@`, `$` et `~`.
+  `@` effectue des requêtes HTTP synchrones décrites en §13.1, `$` effectue l'interpolation
+  décrite en §14 et `~` la correspondance décrite en §15.
 * Ces noms sont reconnus par leur orthographe exacte lorsqu'ils sont en tête d'un appel.
   Une liaison portant le même nom ne remplace donc pas ce builtin dans cette position. Les
   noms peuvent toutefois être utilisés comme noms de liaison dans les autres contextes,
@@ -160,6 +165,19 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 * `io/close fd` ferme un descripteur et retourne `t` s'il était ouvert, sinon `f`.
 * Les erreurs de système de fichiers et les entrées UTF-8 invalides produisent IOError.
 
+13.1 HTTP
+* Syntaxe : `(@ url method)` ou `(@ url method body)`. `url` et `method` doivent être des strings.
+  Les méthodes supportées sont `GET`, `POST`, `PUT`, `PATCH`, `DELETE` et `HEAD`, sans distinction
+  de casse.
+* Le troisième argument est sérialisé en JSON à partir de la valeur Lisp : une string devient donc
+  une string JSON (`"hello"`), tandis qu'un struct devient un objet JSON. Il est envoyé avec
+  `Content-Type: application/json`.
+* Une réponse `HEAD` retourne toujours une string vide. Pour les autres réponses, un
+  `Content-Type` `application/json` (paramètres éventuels acceptés) déclenche le décodage en
+  valeur Lisp ; les autres types retournent le corps comme string.
+* Les erreurs d'arité, de type, de méthode, d'URL, de transport, de statut HTTP 4xx/5xx, de
+  sérialisation et de décodage JSON produisent une erreur Lisp normale.
+
 14. Interpolation $
 * Syntaxe : `($ format arguments...)`. Le premier argument doit être une string ; les arguments
   suivants sont consommés dans l'ordre par les spécificateurs.
@@ -192,26 +210,15 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 * Le résultat de `$` est toujours une string.
 
 15. Regex ~
-* Syntaxe : `(~ pattern valeur)` → retourne un bool. `pattern` et `valeur` doivent être des
-  strings ; une valeur d'un autre type produit TypeError.
-* Le moteur est un sous-ensemble volontairement strict, sans dépendance externe. Les caractères
-  ordinaires correspondent au même caractère Unicode dans le texte.
-* `.` correspond à n'importe quel caractère.
-* `*` placé après un caractère ou `.` correspond à zéro ou plusieurs occurrences de cet élément.
-* `+` placé après un caractère ou `.` correspond à une ou plusieurs occurrences de cet élément.
-* `?` placé après un caractère ou `.` correspond à zéro ou une occurrence de cet élément.
-* `^` au début du pattern impose le début du texte. `$` à la fin du pattern impose la fin du
-  texte. Sans `^` ou `$`, la recherche peut réussir sur n'importe quelle sous-chaîne.
-* Les quantificateurs s'appliquent uniquement à l'élément immédiatement précédent. Les patterns
-  sont évalués avec retour arrière lorsque plusieurs longueurs sont possibles.
-* Le pattern vide correspond toujours ; `^` et `$` seuls peuvent donc aussi correspondre au
-  texte vide ou à une position appropriée.
-* Les groupes `(...)`, l'alternance `|`, les classes `[...]`, les échappements `\` et les autres
-  constructions de regex ne sont pas supportés.
-* Les quantificateurs sans élément précédent, les ancres `^`/`$` utilisées au milieu du pattern
-  et les autres séquences syntaxiquement non reconnues ne correspondent pas.
-* Les constructions explicitement interdites (`(`, `)`, `[`, `]`, `|`, `\`) produisent
-  InvalidRegex. Un pattern refusé ne devient jamais un `f` silencieux.
+* Syntaxe : `(~ regex string binding)` → retourne `f` si aucune correspondance ; sinon retourne
+  un array contenant la correspondance complète suivie des groupes capturants, et lie cet array
+  à `binding`. `regex` et `string` doivent être des strings ; `binding` doit être un identifiant.
+* Les regex utilisent le moteur Rust `regex` et opèrent sur des strings UTF-8. Les groupes
+  capturants sont conservés dans leur ordre ; un groupe optionnel non correspondant devient `_`.
+* En cas de succès, une liaison existante (dans le scope courant ou parent) est mise à jour comme
+  avec `set`. Sinon, une nouvelle liaison est créée dans le scope courant comme avec `let`.
+* En cas d'échec, le résultat est `f` et la liaison existante n'est pas modifiée.
+* Une regex invalide produit InvalidRegex avec le diagnostic du moteur, sans modifier la liaison.
 
 16. Erreurs
 Catégories : ParseError, NameError, TypeError, ArityError, MathError (div/0, overflow), IOError,

@@ -1,3 +1,4 @@
+use regex::Regex;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -7,6 +8,7 @@ use std::{
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 type Cell = Rc<RefCell<Value>>;
 type EnvRef = Rc<RefCell<Env>>;
@@ -641,6 +643,15 @@ fn lookup(env: &EnvRef, n: &str) -> Option<Cell> {
     }
     e.parent.clone().and_then(|p| lookup(&p, n))
 }
+fn bind_value(name: &str, value: Value, env: &EnvRef) {
+    if let Some(cell) = lookup(env, name) {
+        *follow(cell).borrow_mut() = value;
+    } else {
+        env.borrow_mut()
+            .values
+            .push((name.to_owned(), Rc::new(RefCell::new(value))));
+    }
+}
 fn follow(mut c: Cell) -> Cell {
     loop {
         let v = c.borrow().clone();
@@ -743,7 +754,11 @@ fn location(e: &Expr, env: &EnvRef) -> Result<Cell, Error> {
                 Value::Array(array) => {
                     let array = array.borrow();
                     array
-                        .get(array_position(&Value::Int(index), array.len())?)
+                        .get(collection_position(
+                            &Value::Int(index),
+                            array.len(),
+                            "array",
+                        )?)
                         .cloned()
                         .ok_or_else(|| Error::Name(format!("array index {index} out of bounds")))
                 }
@@ -842,18 +857,29 @@ fn apply_index(
                         let indices = indices.borrow();
                         let mut selected = Vec::with_capacity(indices.len());
                         for index in indices.iter() {
-                            let position = array_position(&index.borrow(), values.len())?;
+                            let position =
+                                collection_position(&index.borrow(), values.len(), "array")?;
                             selected.push(Rc::new(RefCell::new(copy(&values[position].borrow()))));
                         }
                         Ok(Value::Array(Rc::new(RefCell::new(selected))))
                     } else {
-                        let position = array_position(&selector, values.len())?;
+                        let position = collection_position(&selector, values.len(), "array")?;
                         Ok(copy(&values[position].borrow()))
                     }
                 }
                 IndexSpec::Range(start, end) => {
-                    let (start, end) =
-                        range_positions(start, end, env, loop_depth, match_depth, values.len())?;
+                    let Some((start, end)) = range_positions(
+                        start,
+                        end,
+                        env,
+                        loop_depth,
+                        match_depth,
+                        values.len(),
+                        "array",
+                    )?
+                    else {
+                        return Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))));
+                    };
                     let selected = values[start..=end]
                         .iter()
                         .map(|cell| Rc::new(RefCell::new(copy(&cell.borrow()))))
@@ -862,28 +888,71 @@ fn apply_index(
                 }
             }
         }
-        Value::Str(_) => Err(Error::Type("string indexing is not supported".into()).into()),
+        Value::Str(string) => {
+            let graphemes: Vec<&str> = string.graphemes(true).collect();
+            match spec {
+                IndexSpec::Selector(_) => {
+                    if let Value::Array(indices) = selector {
+                        let indices = indices.borrow();
+                        let mut selected = Vec::with_capacity(indices.len());
+                        for index in indices.iter() {
+                            let position =
+                                collection_position(&index.borrow(), graphemes.len(), "string")?;
+                            selected.push(Rc::new(RefCell::new(Value::Str(
+                                graphemes[position].to_owned(),
+                            ))));
+                        }
+                        Ok(Value::Array(Rc::new(RefCell::new(selected))))
+                    } else {
+                        let position = collection_position(&selector, graphemes.len(), "string")?;
+                        Ok(Value::Str(graphemes[position].to_owned()))
+                    }
+                }
+                IndexSpec::Range(start, end) => {
+                    let Some((start, end)) = range_positions(
+                        start,
+                        end,
+                        env,
+                        loop_depth,
+                        match_depth,
+                        graphemes.len(),
+                        "string",
+                    )?
+                    else {
+                        return Ok(Value::Str(String::new()));
+                    };
+                    Ok(Value::Str(graphemes[start..=end].concat()))
+                }
+            }
+        }
         _ => Err(Error::Type("indexing requires an array".into()).into()),
     }
 }
-fn array_position(value: &Value, len: usize) -> Result<usize, Error> {
+fn collection_position(value: &Value, len: usize, collection: &str) -> Result<usize, Error> {
     let index = match value {
         Value::Int(index) => *index,
-        _ => return Err(Error::Type("array index must be an integer".into())),
+        _ => {
+            return Err(Error::Type(format!(
+                "{collection} index must be an integer"
+            )))
+        }
     };
     if index == 0 {
-        return Err(Error::Type("array indices are 1-based".into()));
+        return Err(Error::Type(format!("{collection} indices are 1-based")));
     }
     let position = if index > 0 {
-        usize::try_from(index - 1).map_err(|_| Error::Name("array index out of bounds".into()))?
+        usize::try_from(index - 1)
+            .map_err(|_| Error::Name(format!("{collection} index out of bounds")))?
     } else {
         let magnitude = usize::try_from(index.unsigned_abs())
-            .map_err(|_| Error::Name("array index out of bounds".into()))?;
+            .map_err(|_| Error::Name(format!("{collection} index out of bounds")))?;
         len.checked_sub(magnitude)
-            .ok_or_else(|| Error::Name(format!("array index {index} out of bounds")))?
+            .ok_or_else(|| Error::Name(format!("{collection} index {index} out of bounds")))?
     };
     if position >= len {
-        Err(Error::Name(format!("array index {index} out of bounds")))
+        Err(Error::Name(format!(
+            "{collection} index {index} out of bounds"
+        )))
     } else {
         Ok(position)
     }
@@ -895,7 +964,11 @@ fn range_positions(
     loop_depth: usize,
     match_depth: usize,
     len: usize,
-) -> Result<(usize, usize), Flow> {
+    collection: &str,
+) -> Result<Option<(usize, usize)>, Flow> {
+    if len == 0 && start.is_none() && end.is_none() {
+        return Ok(None);
+    }
     let start = match start {
         Some(expr) => eval(expr, env, loop_depth, match_depth)?,
         None => Value::Int(1),
@@ -904,12 +977,12 @@ fn range_positions(
         Some(expr) => eval(expr, env, loop_depth, match_depth)?,
         None => Value::Int(len as i64),
     };
-    let start = array_position(&start, len)?;
-    let end = array_position(&end, len)?;
+    let start = collection_position(&start, len, collection)?;
+    let end = collection_position(&end, len, collection)?;
     if start > end {
-        return Err(Error::Type("array slice start must not exceed end".into()).into());
+        return Err(Error::Type(format!("{collection} slice start must not exceed end")).into());
     }
-    Ok((start, end))
+    Ok(Some((start, end)))
 }
 fn values(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<Vec<Value>, Flow> {
     args.iter().map(|x| eval(x, env, l, m)).collect()
@@ -1114,12 +1187,39 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
             "io/close" => return io_close(args, env, l, m),
             "io/read" => return io_read(args, env, l, m),
             "io/write" => return io_write(args, env, l, m),
+            "@" => return http_request(args, env, l, m),
             "$" => return format_value(args, env, l, m),
             "~" => {
-                need(args, 2, "~")?;
-                let p = as_str(eval(&args[0], env, l, m)?)?;
-                let text = render(&eval(&args[1], env, l, m)?);
-                return Ok(Value::Bool(regex_match(&p, &text).map_err(Flow::Error)?));
+                if args.len() != 3 {
+                    return Err(
+                        Error::Arity(format!("~ expects 3 arguments, got {}", args.len())).into(),
+                    );
+                }
+                let name = if let ExprKind::Symbol(name) = &args[2].kind {
+                    name
+                } else {
+                    return Err(Error::Type("regex binding must be an identifier".into()).into());
+                };
+                let pattern = as_str(eval(&args[0], env, l, m)?)?;
+                let text = as_str(eval(&args[1], env, l, m)?)?;
+                let regex = Regex::new(&pattern)
+                    .map_err(|error| Error::Regex(format!("invalid regex: {error}")))?;
+                let Some(captures) = regex.captures(&text) else {
+                    return Ok(Value::Bool(false));
+                };
+                let result = Value::Array(Rc::new(RefCell::new(
+                    captures
+                        .iter()
+                        .map(|capture| {
+                            Rc::new(RefCell::new(match capture {
+                                Some(value) => Value::Str(value.as_str().to_owned()),
+                                None => Value::Null,
+                            }))
+                        })
+                        .collect(),
+                )));
+                bind_value(name, result.clone(), env);
+                return Ok(result);
             }
             _ => {
                 if [
@@ -1189,6 +1289,87 @@ fn as_str(v: Value) -> Result<String, Flow> {
         Ok(x)
     } else {
         Err(Error::Type("expected string".into()).into())
+    }
+}
+fn http_request(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult {
+    if args.len() != 2 && args.len() != 3 {
+        return Err(Error::Arity(format!("@ expects 2 or 3 arguments, got {}", args.len())).into());
+    }
+    let url = as_str(eval(&args[0], env, l, m)?)?;
+    let method = as_str(eval(&args[1], env, l, m)?)?.to_ascii_uppercase();
+    if !matches!(
+        method.as_str(),
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"
+    ) {
+        return Err(Error::Type(format!("@ unsupported HTTP method: {method}")).into());
+    }
+    let body = if args.len() == 3 {
+        Some(json_render(&eval(&args[2], env, l, m)?).map_err(Flow::Error)?)
+    } else {
+        None
+    };
+    let request = ureq::request(&method, &url).set("Accept", "application/json");
+    let response = match body {
+        Some(body) => request
+            .set("Content-Type", "application/json")
+            .send_string(&body),
+        None => request.call(),
+    }
+    .map_err(|error| match error {
+        ureq::Error::Status(code, _) => {
+            Error::Io(format!("HTTP request failed with status {code}"))
+        }
+        ureq::Error::Transport(error) => Error::Io(format!("HTTP request failed: {error}")),
+    })?;
+
+    if method == "HEAD" {
+        return Ok(Value::Str(String::new()));
+    }
+    let content_type = response
+        .header("Content-Type")
+        .unwrap_or_default()
+        .to_owned();
+    let text = response
+        .into_string()
+        .map_err(|error| Error::Io(format!("failed to read HTTP response: {error}")))?;
+    if content_type
+        .split(';')
+        .next()
+        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
+    {
+        let json: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| Error::Io(format!("invalid JSON response: {error}")))?;
+        json_to_value(json).map_err(Flow::Error)
+    } else {
+        Ok(Value::Str(text))
+    }
+}
+fn json_to_value(value: serde_json::Value) -> Result<Value, Error> {
+    match value {
+        serde_json::Value::Null => Ok(Value::Null),
+        serde_json::Value::Bool(value) => Ok(Value::Bool(value)),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(Value::Int(value))
+            } else if let Some(value) = value.as_f64() {
+                Ok(Value::Float(value))
+            } else {
+                Err(Error::Io("JSON number cannot be represented".into()))
+            }
+        }
+        serde_json::Value::String(value) => Ok(Value::Str(value)),
+        serde_json::Value::Array(values) => Ok(Value::Array(Rc::new(RefCell::new(
+            values
+                .into_iter()
+                .map(|value| json_to_value(value).map(|value| Rc::new(RefCell::new(value))))
+                .collect::<Result<Vec<_>, _>>()?,
+        )))),
+        serde_json::Value::Object(fields) => Ok(Value::Struct(Rc::new(RefCell::new(
+            fields
+                .into_iter()
+                .map(|(key, value)| Ok((key, Rc::new(RefCell::new(json_to_value(value)?)))))
+                .collect::<Result<Vec<_>, Error>>()?,
+        )))),
     }
 }
 fn io_open(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult {
@@ -1537,87 +1718,6 @@ fn debug_render(v: &Value) -> String {
         Value::Function(function) => format!("Function({})", function.params.join(", ")),
     }
 }
-fn regex_match(p: &str, text: &str) -> Result<bool, Error> {
-    if p.contains(|c| matches!(c, '(' | ')' | '[' | ']' | '|' | '\\')) {
-        return Err(Error::Regex("unsupported regex construct".into()));
-    }
-    let anchored_start = p.starts_with('^');
-    let anchored_end = p.ends_with('$') && !p.ends_with("\\$");
-    let core = &p[if anchored_start { 1 } else { 0 }..p.len() - if anchored_end { 1 } else { 0 }];
-    let a: Vec<char> = core.chars().collect();
-    fn go(a: &[char], s: &[char]) -> bool {
-        if a.is_empty() {
-            return true;
-        }
-        let c = a[0];
-        if c == '*' || c == '+' || c == '?' || c == '^' || c == '$' {
-            return false;
-        }
-        let q = if a.len() > 1 { a[1] } else { ' ' };
-        let hit = |x: char| c == '.' || c == x;
-        if q == '*' {
-            let mut n = 0;
-            while n < s.len() && hit(s[n]) {
-                n += 1
-            }
-            return (0..=n).rev().any(|k| go(&a[2..], &s[k..]));
-        }
-        if q == '+' {
-            let mut n = 0;
-            while n < s.len() && hit(s[n]) {
-                n += 1
-            }
-            return n > 0 && (1..=n).rev().any(|k| go(&a[2..], &s[k..]));
-        }
-        if q == '?' {
-            return go(&a[2..], s) || (!s.is_empty() && hit(s[0]) && go(&a[2..], &s[1..]));
-        }
-        !s.is_empty() && hit(s[0]) && go(&a[1..], &s[1..])
-    }
-    let ss: Vec<char> = text.chars().collect();
-    if anchored_start {
-        let ok = go(&a, &ss);
-        return Ok(ok && (!anchored_end || match_len(&a, &ss)));
-    }
-    for i in 0..=ss.len() {
-        if go(&a, &ss[i..]) {
-            if !anchored_end || match_len(&a, &ss[i..]) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-fn match_len(a: &[char], s: &[char]) -> bool {
-    fn rec(a: &[char], s: &[char]) -> bool {
-        if a.is_empty() {
-            return s.is_empty();
-        }
-        let c = a[0];
-        let hit = |x: char| c == '.' || c == x;
-        let q = a.get(1).copied();
-        match q {
-            Some('*') => {
-                let mut n = 0;
-                while n < s.len() && hit(s[n]) {
-                    n += 1
-                }
-                (0..=n).rev().any(|k| rec(&a[2..], &s[k..]))
-            }
-            Some('+') => {
-                let mut n = 0;
-                while n < s.len() && hit(s[n]) {
-                    n += 1
-                }
-                n > 0 && (1..=n).rev().any(|k| rec(&a[2..], &s[k..]))
-            }
-            Some('?') => rec(&a[2..], s) || (!s.is_empty() && hit(s[0]) && rec(&a[2..], &s[1..])),
-            _ => !s.is_empty() && hit(s[0]) && rec(&a[1..], &s[1..]),
-        }
-    }
-    rec(a, s)
-}
-
 fn numeric(v: Value) -> Result<(Option<i64>, f64), Flow> {
     match v {
         Value::Int(n) => Ok((Some(n), n as f64)),
@@ -1941,6 +2041,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
 
     fn run(src: &str) -> Result<Value, Error> {
         LAST_TRACE.with(|trace| trace.borrow_mut().clear());
@@ -1952,6 +2057,126 @@ mod tests {
             result = eval(&form, &env, 0, 0).map_err(flow_err)?;
         }
         Ok(result)
+    }
+
+    fn http_fixture(
+        response: &'static str,
+        expected_request: Option<&'static str>,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 1024];
+            let header_end = loop {
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("Content-Length: "))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let count = stream.read(&mut buffer).unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buffer[..count]);
+            }
+            if let Some(expected) = expected_request {
+                let request = String::from_utf8_lossy(&request);
+                assert!(request[header_end..].contains(expected));
+            }
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (url, handle)
+    }
+
+    #[test]
+    fn http_builtin_returns_text_and_json() {
+        let (url, handle) = http_fixture(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello",
+            None,
+        );
+        assert!(
+            matches!(run(&format!("(@ \"{url}\" \"GET\")")), Ok(Value::Str(value)) if value == "hello")
+        );
+        handle.join().unwrap();
+
+        let (url, handle) = http_fixture(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 13\r\n\r\n{\"answer\":42}",
+            None,
+        );
+        let value = run(&format!("(@ \"{url}\" \"GET\")")).unwrap();
+        assert_eq!(debug_render(&value), "Struct({\"answer\": Int(42)})");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn http_builtin_serializes_lisp_strings_as_json() {
+        let (url, handle) = http_fixture(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
+            Some("\"hello\""),
+        );
+        assert!(matches!(
+            run(&format!("(@ \"{url}\" \"POST\" \"hello\")")),
+            Ok(Value::Str(value)) if value == "ok"
+        ));
+        handle.join().unwrap();
+
+        let (url, handle) = http_fixture(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
+            Some("{\"x\":1}"),
+        );
+        assert!(matches!(
+            run(&format!("(@ \"{url}\" \"POST\" {{\"x\":1}})")),
+            Ok(Value::Str(value)) if value == "ok"
+        ));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn http_builtin_handles_head_without_decoding() {
+        let (url, handle) = http_fixture(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\nnot-json-body",
+            None,
+        );
+        assert!(matches!(
+            run(&format!("(@ \"{url}\" \"HEAD\")")),
+            Ok(Value::Str(value)) if value.is_empty()
+        ));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn http_builtin_reports_method_status_and_json_errors() {
+        assert!(matches!(
+            run("(@ \"http://127.0.0.1:1\" \"OPTIONS\")"),
+            Err(Error::Type(message)) if message.contains("unsupported HTTP method")
+        ));
+
+        let (url, handle) =
+            http_fixture("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n", None);
+        assert!(matches!(
+            run(&format!("(@ \"{url}\" \"GET\")")),
+            Err(Error::Io(message)) if message.contains("status 404")
+        ));
+        handle.join().unwrap();
+
+        let (url, handle) = http_fixture(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\n\r\nnot-json",
+            None,
+        );
+        assert!(matches!(
+            run(&format!("(@ \"{url}\" \"GET\")")),
+            Err(Error::Io(message)) if message.contains("invalid JSON response")
+        ));
+        handle.join().unwrap();
     }
 
     #[test]
@@ -2048,14 +2273,49 @@ mod tests {
     }
 
     #[test]
-    fn array_dot_access_and_string_bracket_access_are_rejected() {
+    fn fully_open_slice_of_empty_array_is_empty() {
+        let value = run("(let a []) (let b a[..]) b").unwrap();
+        assert!(matches!(value, Value::Array(array) if array.borrow().is_empty()));
+    }
+
+    #[test]
+    fn array_dot_access_is_rejected() {
         assert!(matches!(
             run("(let value [1]) value.1"),
             Err(Error::Parse(message)) if message.contains("struct field")
         ));
+    }
+
+    #[test]
+    fn strings_support_grapheme_indexing_and_string_slices() {
+        let value = run(r#"(let s "😀abc")
+               (expect s[1] "😀")
+               (expect s[2] "a")
+               (expect s[-1] "c")
+               (expect s[1..2] "😀a")
+               (expect s[..2] "😀a")
+               (expect s[3..] "bc")
+               (expect s[-2..-1] "bc")
+               (expect s[[1 3]] ["😀" "b"])
+               (expect "é👩‍🚀"[1] "é")
+               (expect ""[..] "")"#)
+        .unwrap();
+        assert!(matches!(value, Value::Bool(true)));
+    }
+
+    #[test]
+    fn string_index_errors_match_collection_rules() {
         assert!(matches!(
-            run(r#""text"[1]"#),
-            Err(Error::Type(message)) if message.contains("string indexing")
+            run(r#""abc"[0]"#),
+            Err(Error::Type(message)) if message.contains("1-based")
+        ));
+        assert!(matches!(
+            run(r#""abc"[4]"#),
+            Err(Error::Name(message)) if message.contains("out of bounds")
+        ));
+        assert!(matches!(
+            run(r#""abc"[1.0]"#),
+            Err(Error::Type(message)) if message.contains("integer")
         ));
     }
 
@@ -2068,8 +2328,57 @@ mod tests {
     }
 
     #[test]
-    fn restricted_regex_works() {
-        let value = run("(~ \"^a.+z$\" \"abz\")").unwrap();
+    fn regex_returns_and_binds_captures() {
+        let value = run(r#"(let string "Hello the world")
+               (~ "^Hello(.*)$" string match)
+               (expect match ["Hello the world" " the world"])"#)
+        .unwrap();
+        assert!(matches!(value, Value::Bool(true)));
+    }
+
+    #[test]
+    fn regex_preserves_multiple_and_optional_captures() {
+        let value = run(r#"(let match _)
+               (~ "^(a)(b)?(c)$" "ac" match)
+               (expect match ["ac" "a" _ "c"])"#)
+        .unwrap();
+        assert!(matches!(value, Value::Bool(true)));
+    }
+
+    #[test]
+    fn regex_failure_does_not_overwrite_binding() {
+        let value = run(r#"(let match ["unchanged"])
+               (expect (~ "^a+$" "bbb" match) f)
+               (expect match ["unchanged"])"#)
+        .unwrap();
+        assert!(matches!(value, Value::Bool(true)));
+    }
+
+    #[test]
+    fn regex_reports_invalid_patterns_and_requires_strings() {
+        assert!(matches!(
+            run(r#"(~ "(" "text" match)"#),
+            Err(Error::Regex(message)) if message.contains("invalid regex")
+        ));
+        assert!(matches!(
+            run(r#"(~ "^a$" 1 match)"#),
+            Err(Error::Type(message)) if message == "expected string"
+        ));
+        assert!(matches!(
+            run(r#"(~ "^a$" "a" [match])"#),
+            Err(Error::Type(message)) if message.contains("binding")
+        ));
+    }
+
+    #[test]
+    fn regex_binding_follows_nested_scope_rules() {
+        let value = run(r#"(let match ["outer"])
+               (let result
+                 ((~ "^(a)$" "a" match)
+                  match))
+               (expect result ["a" "a"])
+               (expect match ["a" "a"])"#)
+        .unwrap();
         assert!(matches!(value, Value::Bool(true)));
     }
 

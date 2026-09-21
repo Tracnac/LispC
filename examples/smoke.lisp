@@ -25,4 +25,4 @@
 (let i 3)
 (loop (if (eq i 0) (break "done")) ((io/write 1 ($ "%d\n" i)) (set i (sub i 1))))
 (match (eq x 0)(io/write 1 "x=0\n") t (io/write 1 "Default\n"))
-(io/write 1 ($ "%s\n" (~ "^a.+z$" "abz")))
+(io/write 1 ($ "%s\n" (~ "^a.+z$" "abz" regex-match)))
