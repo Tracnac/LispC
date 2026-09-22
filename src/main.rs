@@ -148,27 +148,12 @@ thread_local! {
 }
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(unix)]
-unsafe extern "C" fn handle_sigint(_: i32) {
-    INTERRUPTED.store(true, Ordering::Relaxed);
+fn install_sigint_handler() -> Result<(), Error> {
+    ctrlc::set_handler(|| {
+        INTERRUPTED.store(true, Ordering::Relaxed);
+    })
+    .map_err(|error| Error::Io(format!("failed to install Ctrl-C handler: {error}")))
 }
-
-#[cfg(unix)]
-fn install_sigint_handler() {
-    unsafe {
-        unsafe extern "C" {
-            fn signal(
-                signal: i32,
-                handler: Option<unsafe extern "C" fn(i32)>,
-            ) -> Option<unsafe extern "C" fn(i32)>;
-        }
-        const SIGINT: i32 = 2;
-        let _ = signal(SIGINT, Some(handle_sigint));
-    }
-}
-
-#[cfg(not(unix))]
-fn install_sigint_handler() {}
 
 fn check_interrupted() -> Result<(), Error> {
     if INTERRUPTED.load(Ordering::Relaxed) {
@@ -2074,7 +2059,10 @@ fn diagnostic(error: &Error, source: &str, file: &str, span: Option<Span>) -> St
     out
 }
 fn main() {
-    install_sigint_handler();
+    if let Err(error) = install_sigint_handler() {
+        let _ = writeln!(io::stderr(), "{error}");
+        std::process::exit(1);
+    }
     let args: Vec<String> = env::args().collect();
     let file = args.get(1).map_or("<stdin>", String::as_str);
     let src = if args.len() > 1 {
