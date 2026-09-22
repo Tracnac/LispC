@@ -1,4 +1,4 @@
-Small Lisp — Spécification
+Small Lisp, Spécification
 Langage Lisp minimal, interprété (tree-walking), pensé pour du scripting IO simple.
 
 1. Types
@@ -6,11 +6,11 @@ Type	Notation	Rust interne
 string	"..." (échappement \n, \t, etc.)	String
 raw string	'...' (aucun échappement)	String
 bool	t / f	bool
-integer	[+-]?0[xbo]?N — décimal, 0x hex, 0b binaire, 0o octal	i64
+integer	[+-]?0[xbo]?N, décimal, 0x hex, 0b binaire, 0o octal	i64
 float	N.N	f64
 null	_	unit / None
-array	[e1 e2 ...] — hétérogène, imbricable	Vec<Value>
-struct	{"k1":v1 "k2":v2 ...} — clés string uniquement	Vec<(String, Value)> (ordre d'insertion préservé)
+array	[e1 e2 ...], hétérogène, imbricable	Vec<Value>
+struct	{"k1":v1 "k2":v2 ...}, clés string uniquement	Vec<(String, Value)> (ordre d'insertion préservé)
 * Les indices de tableau sont 1-based : arr[1] est le premier élément et arr[-1] le dernier.
 * Les sélections de tableau sont inclusives : arr[start..end], avec une borne omise
   autorisée (arr[..end], arr[start..]), et arr[[i j]] sélectionne plusieurs éléments.
@@ -23,7 +23,7 @@ struct	{"k1":v1 "k2":v2 ...} — clés string uniquement	Vec<(String, Value)> (o
 * Vérité (truthiness) : tout est vrai sauf 0 (integer), 0.0 (float), f, _.
 
 2. Identifiants
-Regex : [A-Za-z0-9_-]+, ASCII uniquement. Un identifiant ne peut pas commencer par un chiffre en pratique — le lexer doit essayer de parser un nombre en premier ; si ça échoue, il retombe sur un identifiant.
+Regex : [A-Za-z0-9_-]+, ASCII uniquement. Un identifiant ne peut pas commencer par un chiffre en pratique, le lexer doit essayer de parser un nombre en premier ; si ça échoue, il retombe sur un identifiant.
 Les symboles `t`, `f`, `_`, `NaN`, `Inf` et `-Inf` sont des littéraux réservés et ne peuvent pas être utilisés comme noms de liaison.
 
 2.1 Mots-clés et noms intégrés
@@ -59,7 +59,7 @@ postfix-access := field-access ("[" selector "]")*
 
 * () est le seul constructeur de scope. if/match n'ouvrent un scope que si leur branche est elle-même un ().
 * . est l'unique forme d'accès à un champ struct. Les tableaux utilisent exclusivement les crochets : arr[1], arr[-1], arr[2..5], arr[[1 3]].
-* . retourne une copie de la valeur (accès par valeur). ^ retourne une référence/alias vers l'emplacement (variable, champ de struct, élément de tableau) — voir §7.
+* . retourne une copie de la valeur (accès par valeur). ^ retourne une référence/alias vers l'emplacement (variable, champ de struct, élément de tableau), voir §7.
 
 4. let / set
 * Les deux évaluent strictement leur expression valeur.
@@ -68,7 +68,7 @@ postfix-access := field-access ("[" selector "]")*
 
 5. Scopes
 * Seul () introduit un nouveau scope lexical.
-* loop : un seul scope créé à l'entrée, réutilisé à chaque itération (pas de nouveau scope par tour) — nécessaire pour que (set x (sub x 1)) accumule d'un tour à l'autre.
+* loop : un seul scope créé à l'entrée, réutilisé à chaque itération (pas de nouveau scope par tour), nécessaire pour que (set x (sub x 1)) accumule d'un tour à l'autre.
 * fn : chaque appel crée un nouveau scope où les paramètres sont liés ; ce scope a pour parent le scope lexical où le fn a été défini (lexical scoping, pas dynamique).
 * Les closures capturent l'environnement par référence : set depuis une closure mute bien la variable extérieure. C'est ce qui permet la récursion (le nom se résout au moment de l'appel, pas de la définition) et les compteurs mutables.
 
@@ -87,7 +87,7 @@ postfix-access := field-access ("[" selector "]")*
   `bit-shr` exigent exactement deux arguments.
 * Il n'y a pas de currying automatique.
 * Passage d'argument par valeur par défaut (copie). Passer ^x fait de l'argument un alias de x : un set dans le corps de la fonction mute la variable de l'appelant.
-* Récursion native : le corps d'un fn n'est évalué qu'à l'appel, et la closure référence son environnement par pointeur — pas besoin de letrec.
+* Récursion native : le corps d'un fn n'est évalué qu'à l'appel, et la closure référence son environnement par pointeur, pas besoin de letrec.
 
 (let incr (fn (n) (set n (add n 1))))
 (let x 5)
@@ -98,7 +98,7 @@ postfix-access := field-access ("[" selector "]")*
 * ^identifier, ^struct.champ, ^arr[i], ou ^arr (le tableau entier) produisent un alias vers l'emplacement correspondant.
   Les sélections multiples (`^arr[[i j]]`) et les tranches (`^arr[start..end]`) ne peuvent pas
   être des cibles de référence.
-* ^ sur un tableau entier est autorisé et permet la mutation en place dans une fonction — l'array passé par référence pointe vers la même structure sous-jacente que celle de l'appelant, toute mutation via des opérations sur ce paramètre (ajout, modification d'un élément, etc.) est visible côté appelant.
+* ^ sur un tableau entier est autorisé et permet la mutation en place dans une fonction, l'array passé par référence pointe vers la même structure sous-jacente que celle de l'appelant, toute mutation via des opérations sur ce paramètre (ajout, modification d'un élément, etc.) est visible côté appelant.
 * Usages : argument de fonction (mutation explicite, §6), ou liaison locale d'alias :
 (let user {"name":"Yvan"})
 (let n (^ user.name))
@@ -140,7 +140,7 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 10. eq par type
 * Tableaux : égalité structurelle profonde, ordre compte.
 * Structs : égalité structurelle profonde, ordre insignifiant (comparaison de map).
-* Fonctions : égalité par identité (même closure physique) — deux fn au code identique mais définis séparément → f.
+* Fonctions : égalité par identité (même closure physique), deux fn au code identique mais définis séparément → f.
 * Floats : comparaison IEEE 754, sans epsilon : NaN n'est égal à aucune valeur (y compris NaN), les zéros signés sont égaux (`0.0 == -0.0`), et les infinis sont égaux à eux-mêmes.
 * Références : déréférencées avant comparaison (§7).
 
@@ -231,7 +231,7 @@ et un curseur `^`. Les erreurs qui traversent des fonctions utilisateur affichen
 d'appel avec le nom de chaque fonction, ou `<anonymous function>`.
 Sur Unix, Ctrl-C est converti en `Interrupted` et pointe vers l'expression en cours d'évaluation.
 
-17. Structs — détails
+17. Structs, détails
 * Ordre d'insertion préservé.
 * Clés dupliquées à la construction → DuplicateKeyError (pas de "dernier gagne" silencieux).
 * Clés string uniquement.
