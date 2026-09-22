@@ -643,24 +643,78 @@ fn lookup(env: &EnvRef, n: &str) -> Option<Cell> {
     }
     e.parent.clone().and_then(|p| lookup(&p, n))
 }
-fn bind_value(name: &str, value: Value, env: &EnvRef) {
+fn bind_value(name: &str, value: Value, env: &EnvRef) -> Result<(), Error> {
     if let Some(cell) = lookup(env, name) {
-        *follow(cell).borrow_mut() = value;
+        let cell = follow(cell)?;
+        if value_references_cell(&value, &cell) {
+            return Err(Error::Type("cyclic reference".into()));
+        }
+        *cell.borrow_mut() = value;
     } else {
         env.borrow_mut()
             .values
             .push((name.to_owned(), Rc::new(RefCell::new(value))));
     }
+    Ok(())
 }
-fn follow(mut c: Cell) -> Cell {
+fn follow(mut c: Cell) -> Result<Cell, Error> {
+    let mut visited = HashSet::new();
     loop {
+        let identity = Rc::as_ptr(&c) as usize;
+        if !visited.insert(identity) {
+            return Err(Error::Type("cyclic reference".into()));
+        }
         let v = c.borrow().clone();
         if let Value::Ref(next) = v {
             c = next
         } else {
-            return c;
+            return Ok(c);
         }
     }
+}
+fn value_references_cell(value: &Value, target: &Cell) -> bool {
+    fn visit(
+        value: &Value,
+        target: &Cell,
+        cells: &mut HashSet<usize>,
+        arrays: &mut HashSet<usize>,
+        structs: &mut HashSet<usize>,
+    ) -> bool {
+        match value {
+            Value::Ref(cell) => {
+                if Rc::ptr_eq(cell, target) {
+                    return true;
+                }
+                let identity = Rc::as_ptr(cell) as usize;
+                cells.insert(identity) && visit(&cell.borrow(), target, cells, arrays, structs)
+            }
+            Value::Array(values) => {
+                let identity = Rc::as_ptr(values) as usize;
+                arrays.insert(identity)
+                    && values
+                        .borrow()
+                        .iter()
+                        .any(|cell| visit(&cell.borrow(), target, cells, arrays, structs))
+            }
+            Value::Struct(fields) => {
+                let identity = Rc::as_ptr(fields) as usize;
+                structs.insert(identity)
+                    && fields
+                        .borrow()
+                        .iter()
+                        .any(|(_, cell)| visit(&cell.borrow(), target, cells, arrays, structs))
+            }
+            _ => false,
+        }
+    }
+
+    visit(
+        value,
+        target,
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+        &mut HashSet::new(),
+    )
 }
 fn copy(v: &Value) -> Value {
     match v {
@@ -727,7 +781,7 @@ fn location(e: &Expr, env: &EnvRef) -> Result<Cell, Error> {
     match &e.kind {
         ExprKind::Symbol(n) => lookup(env, n).ok_or_else(|| Error::Name(n.clone())),
         ExprKind::Field(base, key) => {
-            let c = follow(location(base, env)?);
+            let c = follow(location(base, env)?)?;
             let result = match &*c.borrow() {
                 Value::Struct(s) => s
                     .borrow()
@@ -740,7 +794,7 @@ fn location(e: &Expr, env: &EnvRef) -> Result<Cell, Error> {
             result
         }
         ExprKind::Index(base, IndexSpec::Selector(selector)) => {
-            let c = follow(location(base, env)?);
+            let c = follow(location(base, env)?)?;
             let index = match eval(selector, env, 0, 0).map_err(flow_err)? {
                 Value::Int(index) => index,
                 Value::Array(_) => {
@@ -1020,7 +1074,11 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 need(args, 2, "set")?;
                 let c = location(&args[0], env).map_err(Flow::Error)?;
                 let v = eval(&args[1], env, l, m)?;
-                *follow(c).borrow_mut() = v;
+                let c = follow(c).map_err(Flow::Error)?;
+                if value_references_cell(&v, &c) {
+                    return Err(Error::Type("cyclic reference".into()).into());
+                }
+                *c.borrow_mut() = v;
                 return Ok(Value::Null);
             }
             "if" => {
@@ -1115,7 +1173,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 };
             }
             "match" => {
-                if args.len() % 2 != 0 {
+                if !args.len().is_multiple_of(2) {
                     return Err(
                         Error::Arity("match expects predicate/expression pairs".into()).into(),
                     );
@@ -1218,7 +1276,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                         })
                         .collect(),
                 )));
-                bind_value(name, result.clone(), env);
+                bind_value(name, result.clone(), env).map_err(Flow::Error)?;
                 return Ok(result);
             }
             _ => {
@@ -1798,9 +1856,16 @@ fn builtin(name: &str, vs: Vec<Value>) -> Result<Value, Error> {
             }
             let shift = y as u32;
             Ok(Value::Int(if name == "bit-shl" {
-                x << shift
+                let shifted = x
+                    .checked_shl(shift)
+                    .ok_or_else(|| Error::Math("IntegerOverflow".into()))?;
+                if shifted.checked_shr(shift) != Some(x) {
+                    return Err(Error::Math("IntegerOverflow".into()));
+                }
+                shifted
             } else {
-                x >> shift
+                x.checked_shr(shift)
+                    .ok_or_else(|| Error::Math("IntegerOverflow".into()))?
             }))
         }
         _ => Err(Error::Name(format!("unknown builtin {name}"))),
@@ -1883,7 +1948,10 @@ fn binary_numeric_with_operation(
         if right == 0 {
             return Err(Error::Math("DivisionByZero".into()));
         }
-        return Ok(Value::Int(left % right));
+        return left
+            .checked_rem(right)
+            .map(Value::Int)
+            .ok_or_else(|| Error::Math("IntegerOverflow".into()));
     }
     if name == "pow" && left_int.is_some() && right_int.is_some() {
         return right_int
@@ -1892,23 +1960,28 @@ fn binary_numeric_with_operation(
             .map(Value::Int)
             .ok_or_else(|| Error::Math("IntegerOverflow".into()));
     }
-    if left_int.is_some() && right_int.is_some() && name == "div" {
-        let left = left_int.unwrap();
-        let right = right_int.unwrap();
-        return Ok(Value::Int(left / right));
+    match (left_int, right_int) {
+        (Some(left), Some(right)) if name == "div" => {
+            return left
+                .checked_div(right)
+                .map(Value::Int)
+                .ok_or_else(|| Error::Math("IntegerOverflow".into()));
+        }
+        _ => {}
     }
-    if left_int.is_some() && right_int.is_some() && matches!(name, "add" | "sub" | "mul") {
-        let left = left_int.unwrap();
-        let right = right_int.unwrap();
-        let result = match name {
-            "add" => left.checked_add(right),
-            "sub" => left.checked_sub(right),
-            "mul" => left.checked_mul(right),
-            _ => unreachable!(),
-        };
-        return result
-            .map(Value::Int)
-            .ok_or_else(|| Error::Math("IntegerOverflow".into()));
+    match (left_int, right_int) {
+        (Some(left), Some(right)) if matches!(name, "add" | "sub" | "mul") => {
+            let result = match name {
+                "add" => left.checked_add(right),
+                "sub" => left.checked_sub(right),
+                "mul" => left.checked_mul(right),
+                _ => unreachable!(),
+            };
+            return result
+                .map(Value::Int)
+                .ok_or_else(|| Error::Math("IntegerOverflow".into()));
+        }
+        _ => {}
     }
     Ok(Value::Float(operation(left_float, right_float)))
 }
@@ -2009,7 +2082,7 @@ fn main() {
     } else {
         let mut s = String::new();
         io::stdin()
-            .read_line(&mut s)
+            .read_to_string(&mut s)
             .map(|_| s)
             .map_err(|e| Error::Io(e.to_string()))
     };
@@ -2247,10 +2320,39 @@ mod tests {
     }
 
     #[test]
+    fn integer_builtins_turn_operator_overflows_into_lisp_errors() {
+        for source in [
+            "(div -9223372036854775808 -1)",
+            "(mod -9223372036854775808 -1)",
+            "(bit-shl 4611686018427387904 2)",
+        ] {
+            assert!(matches!(
+                run(source),
+                Err(Error::Math(message)) if message == "IntegerOverflow"
+            ));
+        }
+    }
+
+    #[test]
     fn references_mutate_the_original_location() {
         let value =
             run("(let a [1 2]) (let setzero (fn (x) (set x[1] 0))) (setzero ^a) a[1]").unwrap();
         assert!(matches!(value, Value::Int(0)));
+    }
+
+    #[test]
+    fn cyclic_references_are_reported_as_lisp_errors() {
+        for source in [
+            "(let x _) (set x ^x)",
+            "(let x _) (let y _) (set x ^y) (set y ^x)",
+            "(let x _) (set x [^x])",
+            "(let x _) (set x {\"self\": ^x})",
+        ] {
+            assert!(matches!(
+                run(source),
+                Err(Error::Type(message)) if message == "cyclic reference"
+            ));
+        }
     }
 
     #[test]

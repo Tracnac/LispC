@@ -25,7 +25,8 @@ cargo build --release
 ./target/release/small-lisp examples/smoke.lisp
 ```
 
-The executable accepts a source-file path. Without a path, it reads a program from standard input:
+The executable accepts a source-file path. Without a path, it reads the complete program from
+standard input until EOF:
 
 ```sh
 printf '(add 20 22)\n' | cargo run --quiet
