@@ -30,7 +30,7 @@ Les symboles `t`, `f`, `_`, `NaN`, `Inf` et `-Inf` sont des littéraux réservé
 * Le lexer ne produit pas de token spécial pour les mots-clés : ils sont lexés comme des
   symboles puis reconnus lorsqu'ils apparaissent en tête d'un appel.
 * Les formes spéciales sont : `let`, `set`, `if`, `fn`, `loop`, `break`, `continue`, `match`,
-  `and`, `or`, `not` et `expect`. Elles contrôlent l'évaluation de leurs arguments ; leurs
+  `and`, `or`, `not`, `expect` et `use`. Elles contrôlent l'évaluation de leurs arguments ; leurs
   arguments ne sont donc pas nécessairement tous évalués avant l'appel.
 * Les builtins stricts sont : `add`, `sub`, `mul`, `div`, `mod`, `pow`, `eq`, `ne`, `lt`, `gt`,
   `le`, `ge`, `bit-and`, `bit-or`, `bit-xor`, `bit-not`, `bit-shl` et `bit-shr`. Leurs
@@ -46,6 +46,17 @@ Les symboles `t`, `f`, `_`, `NaN`, `Inf` et `-Inf` sont des littéraux réservé
 * Les noms `io/open`, `io/read`, `io/write` et `io/close` contiennent `/` et constituent des
   symboles intégrés malgré la règle générale des identifiants ; ils ne sont pas des accès de
   champ.
+* `use "str"` charge statiquement un module natif par string. Dans `use nom`, l'expression
+  `nom` est évaluée normalement puis sa valeur string sert à la recherche dynamique du module ;
+  un symbole `str` non lié produit donc NameError. La forme `(use (let nom valeur))` définit
+  immédiatement un module Lisp nommé `nom`. Le registre natif actuel fournit `str`, avec
+  `str.upper` et `str.lower`.
+* Tout membre appelable d'un module doit être un descripteur `{_: callable spec: ...}`.
+  `spec` doit contenir `documentation` (string), `arity` (integer), `type` (array, ou `_`
+  lorsque `arity` vaut zéro) et `return` (array ou `_`). Ces champs sont validés dès l'enregistrement du module et
+  `arity`/`type` sont également appliqués à chaque appel.
+  Un module natif est une struct ordinaire ; ses membres appelables utilisent un champ `_`
+  et un champ `spec`, comme les descripteurs Lisp.
 
 3. Grammaire
 form        := call | block | array | struct | literal | field-access | ref

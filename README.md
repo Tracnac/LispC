@@ -46,6 +46,16 @@ Small Lisp includes:
 - regular-expression matching with capture arrays
 - synchronous HTTP requests and file-descriptor IO
 
+Native modules are loaded with `use`. The initial registry provides `str`, whose functions use
+the same descriptor representation as Lisp-defined callable fields:
+
+```lisp
+(use "str")
+(str.upper "hello") ; "HELLO"
+(str.lower "HELLO") ; "hello"
+($ "%s" str.upper.spec.documentation)
+```
+
 Function arity belongs to each callable. User-defined functions are fixed-arity, while
 `add`, `mul`, `sub`, `div`, comparisons, and the three bitwise folds are variadic. There is no
 automatic currying.

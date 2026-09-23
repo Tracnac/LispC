@@ -1,24 +1,29 @@
 ; Namespace as struct...
 
-(let module {
-  open: {_: (fn () (io/write 1 "Called open\n")),
-    spec: {
-      documentation: "Do an module operation (open)."
-      arity: 2
-      type: ["string","string"]}
-  }   
-  close: {_: (fn () (io/write 1 "Called close\n")), spec: {
-    documentation: "Do an module operation (close)."
-    arity: 0
-    type: []}
-  }
-})
+; Define a new module to be registered.
+(use 
+  (let module {
+    open: {_: (fn (x,y) ($ "Called open with args %s and %s\n" x y)),
+      spec: {
+        documentation: "Do an module operation (open)."
+        arity: 2
+        type: ["string","string"]
+        return: ["string"]}
+    }   
+    close: {_: (fn () ("Called close\n")), spec: {
+      documentation: "Do an module operation (close)."
+      arity: 0
+      type: _
+      return: _}
+    }
+  })
+)
 
 (io/write 1 ($ "%s\n" module.open))
 (io/write 1 ($ "%s\n" module.close))
-(module.open)
+(module.open "args1" "args2")
 (module.close)
 
-; Change internal struct construction...
-
-; (let identity {name: "", login: "", password:""})
+(use "str")
+(io/write 1 ($ "%s\n" str))
+(io/write 1 (str.lower (module.open "args1" "args2")))

@@ -10,6 +10,8 @@ use std::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+mod modules;
+
 type Cell = Rc<RefCell<Value>>;
 type EnvRef = Rc<RefCell<Env>>;
 
@@ -23,6 +25,7 @@ enum Value {
     Array(Rc<RefCell<Vec<Cell>>>),
     Struct(Rc<RefCell<Vec<(String, Cell)>>>),
     Function(Rc<Function>),
+    NativeFunction(Rc<NativeFunction>),
     Ref(Cell),
 }
 #[derive(Clone, Debug)]
@@ -36,6 +39,10 @@ struct Function {
     body: Expr,
     env: EnvRef,
     name: Option<String>,
+}
+struct NativeFunction {
+    name: &'static str,
+    call: fn(Vec<Value>) -> Result<Value, Error>,
 }
 struct Env {
     values: Vec<(String, Cell)>,
@@ -762,6 +769,7 @@ fn render(v: &Value) -> String {
                 .join(" ")
         ),
         Value::Function(_) => "<fn>".into(),
+        Value::NativeFunction(_) => "<native fn>".into(),
     }
 }
 fn render_nested(v: &Value) -> String {
@@ -1049,26 +1057,29 @@ fn need(args: &[Expr], n: usize, name: &str) -> Result<(), Flow> {
         Err(Error::Arity(format!("{name} expects {n} arguments, got {}", args.len())).into())
     }
 }
+fn define_let(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<(String, Value), Flow> {
+    need(args, 2, "let")?;
+    let name = if let ExprKind::Symbol(name) = &args[0].kind {
+        name.clone()
+    } else {
+        return Err(Error::Type("let name must be an identifier".into()).into());
+    };
+    let mut value = eval(&args[1], env, l, m)?;
+    if let Value::Function(function) = &mut value {
+        if let Some(function) = Rc::get_mut(function) {
+            function.name = Some(name.clone());
+        }
+    }
+    env.borrow_mut()
+        .values
+        .push((name.clone(), Rc::new(RefCell::new(value.clone()))));
+    Ok((name, value))
+}
 fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span: Span) -> EResult {
     if let ExprKind::Symbol(name) = &head.kind {
         match name.as_str() {
             "let" => {
-                need(args, 2, "let")?;
-                let n = if let ExprKind::Symbol(n) = &args[0].kind {
-                    n
-                } else {
-                    return Err(Error::Type("let name must be an identifier".into()).into());
-                };
-                let v = eval(&args[1], env, l, m)?;
-                let mut v = v;
-                if let Value::Function(function) = &mut v {
-                    if let Some(function) = Rc::get_mut(function) {
-                        function.name = Some(n.clone());
-                    }
-                }
-                env.borrow_mut()
-                    .values
-                    .push((n.clone(), Rc::new(RefCell::new(v))));
+                define_let(args, env, l, m)?;
                 return Ok(Value::Null);
             }
             "set" => {
@@ -1242,6 +1253,23 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 ))
                 .into());
             }
+            "use" => {
+                need(args, 1, "use")?;
+                let (name, module) = match &args[0].kind {
+                    ExprKind::Call(let_head, let_args) if matches!(&let_head.kind, ExprKind::Symbol(name) if name == "let") => {
+                        define_let(let_args, env, l, m)?
+                    }
+                    ExprKind::Lit(Literal::Str(name)) => (name.clone(), native_module(name)?),
+                    _ => {
+                        let name = as_str(eval(&args[0], env, l, m)?)?;
+                        let module = native_module(&name)?;
+                        (name, module)
+                    }
+                };
+                validate_module(&module).map_err(Flow::Error)?;
+                bind_value(&name, module.clone(), env).map_err(Flow::Error)?;
+                return Ok(module);
+            }
             "io/open" => return io_open(args, env, l, m),
             "io/close" => return io_close(args, env, l, m),
             "io/read" => return io_read(args, env, l, m),
@@ -1292,8 +1320,146 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
             }
         }
     }
-    let fun = operator_value(eval(head, env, l, m)?);
-    invoke(fun, values(args, env, l, m)?, call_span)
+    let value = eval(head, env, l, m)?;
+    let arguments = values(args, env, l, m)?;
+    invoke_operator(value, arguments, call_span)
+}
+fn invoke_operator(value: Value, vals: Vec<Value>, call_span: Span) -> EResult {
+    if let Value::Struct(fields) = &value {
+        if fields.borrow().iter().any(|(key, _)| key == "_") {
+            if let Err(error) = validate_descriptor(fields, &vals) {
+                LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
+                return Err(error.into());
+            }
+        }
+    }
+    invoke(operator_value(value), vals, call_span)
+}
+fn validate_module(value: &Value) -> Result<(), Error> {
+    let Value::Struct(fields) = value else {
+        return Err(Error::Type("module must be a struct".into()));
+    };
+    for (_, cell) in fields.borrow().iter() {
+        let Value::Struct(descriptor) = copy(&cell.borrow()) else {
+            return Err(Error::Type(
+                "module members must be callable descriptors".into(),
+            ));
+        };
+        validate_descriptor_spec(&descriptor)?;
+    }
+    Ok(())
+}
+fn validate_descriptor_spec(
+    fields: &Rc<RefCell<Vec<(String, Cell)>>>,
+) -> Result<(usize, Vec<String>), Error> {
+    let field = |name: &str| {
+        fields
+            .borrow()
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, cell)| copy(&cell.borrow()))
+    };
+    match field("_") {
+        Some(value) if is_callable(&value) => {}
+        Some(_) => return Err(Error::Type("module descriptor _ must be callable".into())),
+        None => return Err(Error::Type("module descriptor must contain _".into())),
+    }
+    let spec = match field("spec") {
+        Some(Value::Struct(spec)) => spec,
+        Some(_) => {
+            return Err(Error::Type(
+                "module descriptor spec must be a struct".into(),
+            ))
+        }
+        None => {
+            return Err(Error::Type(
+                "module descriptor must contain a spec field".into(),
+            ))
+        }
+    };
+    let spec_field = |name: &str| {
+        spec.borrow()
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, cell)| copy(&cell.borrow()))
+    };
+    if !matches!(spec_field("documentation"), Some(Value::Str(_))) {
+        return Err(Error::Type(
+            "module descriptor spec.documentation must be a string".into(),
+        ));
+    }
+    let arity = match spec_field("arity") {
+        Some(Value::Int(arity)) if arity >= 0 => arity as usize,
+        _ => {
+            return Err(Error::Type(
+                "module descriptor spec.arity must be an integer".into(),
+            ))
+        }
+    };
+    let types = match spec_field("type") {
+        Some(Value::Null) if arity == 0 => Vec::new(),
+        Some(Value::Array(types)) if arity > 0 => types
+            .borrow()
+            .iter()
+            .map(|cell| match &*cell.borrow() {
+                Value::Str(value) => Ok(value.clone()),
+                _ => Err(Error::Type(
+                    "module descriptor spec.type entries must be strings".into(),
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err(Error::Type(
+                "module descriptor spec.type must be an array, or _ for arity 0".into(),
+            ))
+        }
+    };
+    if types.len() != arity {
+        return Err(Error::Type(
+            "module descriptor spec.type length must match spec.arity".into(),
+        ));
+    }
+    if !matches!(spec_field("return"), Some(Value::Null | Value::Array(_))) {
+        return Err(Error::Type(
+            "module descriptor spec.return must be an array or null".into(),
+        ));
+    }
+    Ok((arity, types))
+}
+fn validate_descriptor(
+    fields: &Rc<RefCell<Vec<(String, Cell)>>>,
+    vals: &[Value],
+) -> Result<(), Error> {
+    let (arity, types) = validate_descriptor_spec(fields)?;
+    if vals.len() != arity {
+        return Err(Error::Arity(format!(
+            "module function expects {arity} arguments, got {}",
+            vals.len()
+        )));
+    }
+    for (index, (expected, actual)) in types.iter().zip(vals).enumerate() {
+        let actual_type = value_type(actual);
+        if expected != actual_type {
+            return Err(Error::Type(format!(
+                "module function argument {} expects {expected}, got {actual_type}",
+                index + 1
+            )));
+        }
+    }
+    Ok(())
+}
+fn is_callable(value: &Value) -> bool {
+    match value {
+        Value::Function(_) | Value::NativeFunction(_) => true,
+        Value::Ref(cell) => is_callable(&cell.borrow()),
+        _ => false,
+    }
+}
+fn native_module(name: &str) -> Result<Value, Error> {
+    let factory = modules::registry()
+        .remove(name)
+        .ok_or_else(|| Error::Name(format!("unknown native module {name}")))?;
+    Ok(factory())
 }
 fn operator_value(value: Value) -> Value {
     match value {
@@ -1311,6 +1477,9 @@ fn operator_value(value: Value) -> Value {
 fn invoke(f: Value, vals: Vec<Value>, call_span: Span) -> EResult {
     let f = match f {
         Value::Function(f) => f,
+        Value::NativeFunction(f) => {
+            return (f.call)(vals).map_err(Into::into);
+        }
         Value::Ref(c) => return invoke(copy(&c.borrow()), vals, call_span),
         _ => return Err(Error::Type("value is not callable".into()).into()),
     };
@@ -1697,6 +1866,7 @@ fn value_type(value: &Value) -> &'static str {
         Value::Array(_) => "array",
         Value::Struct(_) => "struct",
         Value::Function(_) => "function",
+        Value::NativeFunction(_) => "function",
         Value::Ref(_) => "ref",
     }
 }
@@ -1741,6 +1911,9 @@ fn json_render(v: &Value) -> Result<String, Error> {
             .collect::<Result<Vec<_>, Error>>()
             .map(|fields| format!("{{{}}}", fields.join(","))),
         Value::Function(_) => Err(Error::Format(
+            "FormatTypeError: %j cannot encode function".into(),
+        )),
+        Value::NativeFunction(_) => Err(Error::Format(
             "FormatTypeError: %j cannot encode function".into(),
         )),
     }
@@ -1788,6 +1961,7 @@ fn debug_render(v: &Value) -> String {
                 .join(", ")
         ),
         Value::Function(function) => format!("Function({})", function.params.join(", ")),
+        Value::NativeFunction(function) => format!("NativeFunction({})", function.name),
     }
 }
 fn numeric(v: Value) -> Result<(Option<i64>, f64), Flow> {
@@ -2033,6 +2207,7 @@ fn equals(a: &Value, b: &Value) -> bool {
         (Value::Int(x), Value::Float(y)) | (Value::Float(y), Value::Int(x)) => (*x as f64) == *y,
         (Value::Str(x), Value::Str(y)) => x == y,
         (Value::Function(x), Value::Function(y)) => Rc::ptr_eq(x, y),
+        (Value::NativeFunction(x), Value::NativeFunction(y)) => Rc::ptr_eq(x, y),
         (Value::Array(x), Value::Array(y)) => {
             let x = x.borrow();
             let y = y.borrow();
@@ -2473,7 +2648,7 @@ mod tests {
             (let module {
               open: {
                 _: (fn () 42)
-                spec: {documentation: "open" arity: 0}
+                spec: {documentation: "open" arity: 0 type: _ return: []}
               }
             })
             (module.open)
@@ -2482,13 +2657,183 @@ mod tests {
         assert!(matches!(value, Value::Int(42)));
 
         let value = run(r#"
-            (let module {open: {_: (fn () 42) spec: {arity: 0}}})
+            (let module {open: {_: (fn () 42) spec: {documentation:"open" arity: 0 type: _ return: []}}})
             ($ "%s" module.open)
         "#)
         .unwrap();
         assert!(matches!(
             value,
-            Value::Str(text) if text == "{_:<fn> spec:{arity:0}}"
+            Value::Str(text) if text == r#"{_:<fn> spec:{documentation:"open" arity:0 type: return:[]}}"#
+        ));
+    }
+
+    #[test]
+    fn native_str_module_is_loaded_and_introspectable() {
+        let value = run(r#"(use "str")
+               (expect (str.upper "hello") "HELLO")
+               (expect (str.lower "HELLO") "hello")
+               (expect str.upper.spec.documentation "Convert a string to uppercase.")
+               (expect str.upper.spec.arity 1)
+               (expect str.upper.spec.type ["string"])
+               (expect str.upper.spec.return ["string"])
+               ($ "%s" str.upper)"#)
+        .unwrap();
+        assert!(matches!(
+            value,
+            Value::Str(text) if text == r#"{_:<native fn> spec:{documentation:"Convert a string to uppercase." arity:1 type:["string"] return:["string"]}}"#
+        ));
+    }
+
+    #[test]
+    fn use_accepts_string_names_and_rejects_unknown_modules() {
+        let value = run(r#"(use "str") (str.upper "hello")"#).unwrap();
+        assert!(matches!(value, Value::Str(text) if text == "HELLO"));
+        let value = run(r#"(let module-name "str") (use module-name) (str.lower "ABC")"#).unwrap();
+        assert!(matches!(value, Value::Str(text) if text == "abc"));
+        let value = run(r#"(let str "str") (use str) (str.upper "hello")"#).unwrap();
+        assert!(matches!(value, Value::Str(text) if text == "HELLO"));
+        assert!(matches!(
+            run("(use str)"),
+            Err(Error::Name(message)) if message == "str"
+        ));
+        assert!(matches!(
+            run("(use \"missing\")"),
+            Err(Error::Name(message)) if message == "unknown native module missing"
+        ));
+    }
+
+    #[test]
+    fn lisp_modules_are_loaded_from_named_bindings_and_validate_descriptors() {
+        let value = run(r#"(use (let mymodule {
+                 add: {
+                   _: (fn (x y) x)
+                   spec: {
+                     documentation: "Return the first string."
+                     arity: 2
+                     type: ["string" "string"]
+                     return: []
+                   }
+                 }
+               }))
+               (expect mymodule.add.spec.documentation "Return the first string.")
+               (expect mymodule.add.spec.arity 2)
+               (expect mymodule.add.spec.type ["string" "string"])
+               (mymodule.add "a" "b")"#)
+        .unwrap();
+        assert!(matches!(value, Value::Str(text) if text == "a"));
+
+        assert!(matches!(
+            run(r#"(use (let mymodule {
+                add: {_: (fn (x y) x) spec: {documentation: "add" arity: 2 type: ["string" "string"] return: []}}
+            })) (mymodule.add "a")"#),
+            Err(Error::Arity(message)) if message.contains("expects 2 arguments")
+        ));
+        assert!(matches!(
+            run(r#"(use (let mymodule {
+                add: {_: (fn (x y) x) spec: {documentation: "add" arity: 2 type: ["string" "string"] return: []}}
+            })) (mymodule.add 10 "b")"#),
+            Err(Error::Type(message)) if message.contains("argument 1 expects string")
+        ));
+    }
+
+    #[test]
+    fn native_descriptors_use_the_same_validation_path() {
+        assert!(matches!(
+            run("(use \"str\") (str.upper)"),
+            Err(Error::Arity(message)) if message.contains("expects 1 arguments")
+        ));
+        assert!(matches!(
+            run("(use \"str\") (str.upper 10)"),
+            Err(Error::Type(message)) if message.contains("argument 1 expects string")
+        ));
+    }
+
+    #[test]
+    fn module_argument_validation_reports_the_call_site_after_nested_evaluation() {
+        let source = r#"
+(use (let module {
+    open: {
+        _: (fn (x y) (io/write 1 ($ "Called open with args %s and %s\n" x y)))
+        spec: {
+            documentation: "open"
+            arity: 2
+            type: ["string" "string"]
+            return: ["string"]
+        }
+    }
+}))
+(use "str")
+(str.lower (module.open "args1" "args2"))
+"#;
+        let error = match run(source) {
+            Err(error) => error,
+            Ok(_) => panic!("expected a module argument type error"),
+        };
+        assert!(matches!(
+            &error,
+            Error::Type(message) if message.contains("argument 1 expects string, got int")
+        ));
+        let span = LAST_ERROR_SPAN.with(|span| *span.borrow());
+        let rendered = diagnostic(&error, source, "sample.lisp", span);
+        assert!(rendered.starts_with("sample.lisp:14:"));
+        assert!(rendered.contains("(str.lower (module.open"));
+    }
+
+    #[test]
+    fn descriptor_registration_requires_a_complete_callable_spec() {
+        let valid = r#"(use (let module {
+            foo: {_: (fn (x) x) spec: {
+                documentation: "foo" arity: 1 type: ["string"] return: []
+            }}
+        }))"#;
+        assert!(run(valid).is_ok());
+
+        let valid_return = r#"(use (let module {
+            foo: {_: (fn (x) x) spec: {
+                documentation: "foo" arity: 1 type: ["string"] return: ["string"]
+            }}
+        }))"#;
+        assert!(run(valid_return).is_ok());
+
+        for spec in [
+            r#"{arity: 1 type: ["string"] return: []}"#,
+            r#"{documentation: "foo" type: ["string"] return: []}"#,
+            r#"{documentation: "foo" arity: 1 return: []}"#,
+            r#"{documentation: "foo" arity: 1 type: ["string"]}"#,
+            r#"{documentation: 1 arity: 1 type: ["string"] return: []}"#,
+            r#"{documentation: "foo" arity: "1" type: ["string"] return: []}"#,
+            r#"{documentation: "foo" arity: 1 type: "string" return: []}"#,
+            r#"{documentation: "foo" arity: 1 type: ["string"] return: 1}"#,
+        ] {
+            let source = format!("(use (let module {{foo: {{_: (fn (x) x) spec: {spec}}}}}))");
+            assert!(matches!(run(&source), Err(Error::Type(_))), "{source}");
+        }
+
+        assert!(matches!(
+            run(r#"(use (let module {
+                foo: {spec: {documentation: "foo" arity: 1 type: ["string"] return: []}}
+            }))"#),
+            Err(Error::Type(message)) if message.contains("contain _")
+        ));
+        assert!(matches!(
+            run(r#"(use (let module {
+                foo: {_: 1 spec: {documentation: "foo" arity: 1 type: ["string"] return: []}}
+            }))"#),
+            Err(Error::Type(message)) if message.contains("_ must be callable")
+        ));
+        assert!(run(r#"(use (let module {
+            foo: {_: (fn () 1) spec: {
+                documentation: "foo" arity: 0 type: _ return: _
+            }}
+        })) (module.foo)"#)
+        .is_ok());
+        assert!(matches!(
+            run(r#"(use (let module {
+                foo: {_: (fn () 1) spec: {
+                    documentation: "foo" arity: 0 type: [] return: _
+                }}
+            }))"#),
+            Err(Error::Type(message)) if message.contains("spec.type")
         ));
     }
 
