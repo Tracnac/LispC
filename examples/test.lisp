@@ -35,15 +35,15 @@
 ; ============================================================
 
 (let complex-struct
-  {"name":"Yvan"
-   "age":56
-   "address":"1 rue de paris"
-   "city":"Paris"
-   "contact":{
-     "gsm":"0102030405"
-     "fax":"0102030406"
+  {name:"Yvan"
+   age:56
+   address:"1 rue de paris"
+   city:"Paris"
+   contact:{
+     gsm:"0102030405"
+     fax:"0102030406"
    }
-   "score":[
+   score:[
      1
      2
      [21 [211 212] 22 23]
@@ -52,15 +52,15 @@
 
 (expect
   complex-struct
-  {"name":"Yvan"
-   "age":56
-   "address":"1 rue de paris"
-   "city":"Paris"
-   "contact":{
-     "gsm":"0102030405"
-     "fax":"0102030406"
+  {name:"Yvan"
+   age:56
+   address:"1 rue de paris"
+   city:"Paris"
+   contact:{
+     gsm:"0102030405"
+     fax:"0102030406"
    }
-   "score":[1 2 [21 [211 212] 22 23] 3]}
+   score:[1 2 [21 [211 212] 22 23] 3]}
   "Struct equality")
 
 ; ------------------------------------------------------------
@@ -189,27 +189,27 @@
 ; ============================================================
 
 (expect
-  (eq {"a":1 "b":2} {"a":1 "b":2})
+  (eq {a:1 b:2} {a:1 b:2})
   t
   "Struct equality")
 
 (expect
-  (eq {"a":1 "b":2} {"b":2 "a":1})
+  (eq {a:1 b:2} {b:2 a:1})
   t
   "Struct key order is irrelevant")
 
 (expect
-  (eq {"a":1 "b":2} {"a":1 "b":3})
+  (eq {a:1 b:2} {a:1 b:3})
   f
   "Struct values differ")
 
 (expect
-  (eq {"a":[1 2]} {"a":[1 2]})
+  (eq {a:[1 2]} {a:[1 2]})
   t
   "Deep struct equality")
 
 (expect
-  (eq {"a":[1 2]} {"a":[2 1]})
+  (eq {a:[1 2]} {a:[2 1]})
   f
   "Deep array order matters")
 
@@ -233,7 +233,9 @@
 (expect ($ "%d %h %o" 127 127 127) "127 7f 177")
 ; General values
 (expect ($ "%s %f %t" "text" 1.5 1.5) "text 1.5 float")
-(expect ($ "%j" {"name":"Ada" "values":[1 t _]}) "{\"name\":\"Ada\",\"values\":[1,true,null]}")
+(expect ($ "%j" {name:"Ada" values:[1 t _]}) "{\"name\":\"Ada\",\"values\":[1,true,null]}")
+(expect ($ "%v" {name:"Ada" values:[1 t _]})
+        "Struct({name: Str(\"Ada\"), values: Array([Int(1), Bool(true), Null])})")
 (expect ($ "%v" [1 "text"]) "Array([Int(1), Str(\"text\")])")
 (expect ($ "100%%") "100%")
 
@@ -794,7 +796,7 @@
 (expect (eq [1 2] [1 2]) t "eq: arrays")
 (expect (eq [1 2] [2 1]) f "eq: array order")
 
-(expect (eq {"a":1 "b":2} {"b":2 "a":1})
+(expect (eq {a:1 b:2} {b:2 a:1})
         t
         "eq: struct key order")
 

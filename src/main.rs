@@ -602,10 +602,10 @@ impl Parser {
         while self.peek().map(|t| &t.kind) != Some(&TokKind::RBrace) {
             let key = match self.take() {
                 Some(Tok {
-                    kind: TokKind::Str(x),
+                    kind: TokKind::Symbol(x),
                     span,
                 }) => (x, span),
-                _ => return Err(Error::Parse("struct key must be string".into())),
+                _ => return Err(Error::Parse("struct key must be an identifier".into())),
             };
             if self.take().map(|t| t.kind) != Some(TokKind::Colon) {
                 return Err(Error::Parse("expected : after struct key".into()));
@@ -1292,8 +1292,21 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
             }
         }
     }
-    let fun = eval(head, env, l, m)?;
+    let fun = operator_value(eval(head, env, l, m)?);
     invoke(fun, values(args, env, l, m)?, call_span)
+}
+fn operator_value(value: Value) -> Value {
+    match value {
+        Value::Struct(fields) => fields
+            .borrow()
+            .iter()
+            .find(|(key, _)| key == "_")
+            .map(|(_, value)| value.clone())
+            .map_or(Value::Struct(fields.clone()), |value| {
+                operator_value(copy(&value.borrow()))
+            }),
+        value => value,
+    }
 }
 fn invoke(f: Value, vals: Vec<Value>, call_span: Span) -> EResult {
     let f = match f {
@@ -1770,7 +1783,7 @@ fn debug_render(v: &Value) -> String {
             fields
                 .borrow()
                 .iter()
-                .map(|(key, value)| format!("{key:?}: {}", debug_render(&value.borrow())))
+                .map(|(key, value)| format!("{key}: {}", debug_render(&value.borrow())))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -2190,7 +2203,7 @@ mod tests {
             None,
         );
         let value = run(&format!("(@ \"{url}\" \"GET\")")).unwrap();
-        assert_eq!(debug_render(&value), "Struct({\"answer\": Int(42)})");
+        assert_eq!(debug_render(&value), "Struct({answer: Int(42)})");
         handle.join().unwrap();
     }
 
@@ -2211,7 +2224,7 @@ mod tests {
             Some("{\"x\":1}"),
         );
         assert!(matches!(
-            run(&format!("(@ \"{url}\" \"POST\" {{\"x\":1}})")),
+            run(&format!("(@ \"{url}\" \"POST\" {{x:1}})")),
             Ok(Value::Str(value)) if value == "ok"
         ));
         handle.join().unwrap();
@@ -2350,7 +2363,7 @@ mod tests {
             "(let x _) (set x ^x)",
             "(let x _) (let y _) (set x ^y) (set y ^x)",
             "(let x _) (set x [^x])",
-            "(let x _) (set x {\"self\": ^x})",
+            "(let x _) (set x {self: ^x})",
         ] {
             assert!(matches!(
                 run(source),
@@ -2371,7 +2384,7 @@ mod tests {
         .unwrap();
         assert!(matches!(value, Value::Bool(true)));
 
-        let value = run(r#"(let value {"score":[23 [1 2 3] 66]})
+        let value = run(r#"(let value {score:[23 [1 2 3] 66]})
                (expect value.score[2][3] 3)
                (expect value.score[2][[1 3]] [1 3])"#)
         .unwrap();
@@ -2427,15 +2440,13 @@ mod tests {
 
     #[test]
     fn duplicate_struct_key_is_an_error() {
-        assert!(matches!(
-            run("{\"x\": 1 \"x\": 2}"),
-            Err(Error::DuplicateKey(_))
-        ));
+        assert!(matches!(run("{x: 1 x: 2}"), Err(Error::DuplicateKey(_))));
+        assert!(matches!(run("{_: 1 _: 2}"), Err(Error::DuplicateKey(key)) if key == "_"));
     }
 
     #[test]
     fn duplicate_struct_key_diagnostic_points_at_duplicate_key() {
-        let source = "(let value {\n  \"x\": 1\n  \"x\": 2\n})";
+        let source = "(let value {\n  x: 1\n  x: 2\n})";
         let error = match run(source) {
             Err(error) => error,
             Ok(_) => panic!("expected duplicate key error"),
@@ -2443,7 +2454,42 @@ mod tests {
         let span = LAST_ERROR_SPAN.with(|span| *span.borrow());
         let rendered = diagnostic(&error, source, "sample.lisp", span);
         assert!(rendered.starts_with("sample.lisp:3:3:"));
-        assert!(rendered.contains("  \"x\": 2"));
+        assert!(rendered.contains("  x: 2"));
+    }
+
+    #[test]
+    fn struct_keys_use_identifier_syntax() {
+        let value = run(r#"(let value {name:"Yvan" visits:2}) value.name"#).unwrap();
+        assert!(matches!(value, Value::Str(name) if name == "Yvan"));
+        assert!(matches!(
+            run(r#"{"name":"Yvan"}"#),
+            Err(Error::Parse(message)) if message == "struct key must be an identifier"
+        ));
+    }
+
+    #[test]
+    fn structs_unwrap_the_underscore_field_only_in_operator_position() {
+        let source = r#"
+            (let module {
+              open: {
+                _: (fn () 42)
+                spec: {documentation: "open" arity: 0}
+              }
+            })
+            (module.open)
+        "#;
+        let value = run(source).unwrap();
+        assert!(matches!(value, Value::Int(42)));
+
+        let value = run(r#"
+            (let module {open: {_: (fn () 42) spec: {arity: 0}}})
+            ($ "%s" module.open)
+        "#)
+        .unwrap();
+        assert!(matches!(
+            value,
+            Value::Str(text) if text == "{_:<fn> spec:{arity:0}}"
+        ));
     }
 
     #[test]
@@ -2515,15 +2561,19 @@ mod tests {
         assert!(matches!(value, Value::Str(text) if text == "int array"));
 
         let value =
-            run(r#"($ "%s" {"name":"Yvan" "contact":{"gsm":"0102030405"} "score":["ok" 2]})"#)
-                .unwrap();
+            run(r#"($ "%s" {name:"Yvan" contact:{gsm:"0102030405"} score:["ok" 2]})"#).unwrap();
         assert!(
             matches!(value, Value::Str(text) if text == r#"{name:"Yvan" contact:{gsm:"0102030405"} score:["ok" 2]}"#)
         );
 
-        let value = run("($ \"%j\" {\"name\": \"Ada\" \"values\": [1 t _]})").unwrap();
+        let value = run("($ \"%j\" {name: \"Ada\" values: [1 t _]})").unwrap();
         assert!(
             matches!(value, Value::Str(text) if text == r#"{"name":"Ada","values":[1,true,null]}"#)
+        );
+
+        let value = run("($ \"%v\" {name: \"Ada\" values: [1 t _]})").unwrap();
+        assert!(
+            matches!(value, Value::Str(text) if text == r#"Struct({name: Str("Ada"), values: Array([Int(1), Bool(true), Null])})"#)
         );
 
         let value = run("($ \"%v\" [1 \"x\"])").unwrap();

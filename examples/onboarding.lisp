@@ -9,7 +9,7 @@
 (match
   (~ "^(.+)$" name name-match)
   (
-    (let profile {"name":name "visits":0 "roles":["reader" "writer"]})
+    (let profile {name:name visits:0 roles:["reader" "writer"]})
 
     ; A function receives an explicit alias, so it mutates the struct field.
     (let register-visit (fn (count) (set count (add count 1))))

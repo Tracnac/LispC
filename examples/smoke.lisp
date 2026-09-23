@@ -11,7 +11,7 @@
 (let fact (fn (n) (if (eq n 0) 1 (mul n (fact (sub n 1))))))(io/write 1 ($ "%d\n" (fact 5)))
 
 ; aliases and containers
-(let user {"name":"Yvan" "tags":["dev" "lisp"]})
+(let user {name:"Yvan" tags:["dev" "lisp"]})
 (let name (^ user.name))
 (set name "Nouveau")
 (io/write 1 ($ "%s\n" user.name))

@@ -10,7 +10,7 @@ integer	[+-]?0[xbo]?N, décimal, 0x hex, 0b binaire, 0o octal	i64
 float	N.N	f64
 null	_	unit / None
 array	[e1 e2 ...], hétérogène, imbricable	Vec<Value>
-struct	{"k1":v1 "k2":v2 ...}, clés string uniquement	Vec<(String, Value)> (ordre d'insertion préservé)
+struct	{k1:v1 k2:v2 ...}, clés identifiants uniquement	Vec<(String, Value)> (ordre d'insertion préservé)
 * Les indices de tableau sont 1-based : arr[1] est le premier élément et arr[-1] le dernier.
 * Les sélections de tableau sont inclusives : arr[start..end], avec une borne omise
   autorisée (arr[..end], arr[start..]), et arr[[i j]] sélectionne plusieurs éléments.
@@ -52,7 +52,7 @@ form        := call | block | array | struct | literal | field-access | ref
 call        := "(" symbol form* ")"
 block       := "(" form* ")"                      ; nouveau scope, retourne la dernière valeur
 array       := "[" form* "]"
-struct      := "{" (string ":" form)* "}"
+struct      := "{" (identifier ":" form)* "}"
 field-access:= identifier ("." identifier)*        ; sucre pour (. (. a b) c)
 ref        := "^" postfix-access                  ; référence/alias vers un emplacement
 postfix-access := field-access ("[" selector "]")*
@@ -100,7 +100,7 @@ postfix-access := field-access ("[" selector "]")*
   être des cibles de référence.
 * ^ sur un tableau entier est autorisé et permet la mutation en place dans une fonction, l'array passé par référence pointe vers la même structure sous-jacente que celle de l'appelant, toute mutation via des opérations sur ce paramètre (ajout, modification d'un élément, etc.) est visible côté appelant.
 * Usages : argument de fonction (mutation explicite, §6), ou liaison locale d'alias :
-(let user {"name":"Yvan"})
+(let user {name:"Yvan"})
 (let n (^ user.name))
 (set n "Nouveau")
 (io/write 1 ($ "%s" user.name))   ; "Nouveau"
@@ -192,14 +192,16 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 * `%h` exige un integer et produit son écriture hexadécimale minuscule, sans préfixe `0x`.
 * `%o` exige un integer et produit son écriture octale, sans préfixe `0o`.
 * `%f` accepte un integer ou un float et produit une valeur numérique rendue en Float.
-* `%j` accepte les valeurs sérialisables en JSON et produit une string JSON compacte :
+* `%j` accepte les valeurs sérialisables en JSON et produit une string JSON compacte ; les clés
+  de struct sont des strings JSON entre guillemets :
   `_` devient `null`, `t`/`f` deviennent `true`/`false`, les structs ont des clés
   entourées de guillemets. Les fonctions ne sont pas sérialisables et les Float `NaN`,
   `Inf` et `-Inf` sont refusés.
 * `%t` accepte tout type et produit son nom de type (`null`, `bool`, `int`, `float`, `string`,
   `array`, `struct`, `function` ou `ref`).
 * `%v` accepte tout type et produit sa représentation structurelle de debug (`Array(...)`,
-  `Struct(...)`, `Int(...)`, etc.).
+  `Struct(...)`, `Int(...)`, etc.). Les clés de struct suivent la syntaxe Lisp (`name: value`),
+  sans guillemets.
 * `%%` produit un caractère `%` littéral et ne consomme aucun argument.
 * Un `%` final, un spécificateur inconnu ou une largeur binaire autre que 8, 16, 32 ou 64
   produit une FormatError.
@@ -234,7 +236,10 @@ Sur Unix, Ctrl-C est converti en `Interrupted` et pointe vers l'expression en co
 17. Structs, détails
 * Ordre d'insertion préservé.
 * Clés dupliquées à la construction → DuplicateKeyError (pas de "dernier gagne" silencieux).
-* Clés string uniquement.
+* Clés identifiants uniquement, sans guillemets.
+* En position opérateur d'un appel, un struct qui contient le champ `_` est automatiquement
+  déballé vers la valeur de ce champ puis appelé. Les autres évaluations, notamment l'accès
+  de champ et l'interpolation, conservent le struct complet.
 
 18. Implémentation
 Interpréteur tree-walking en Rust (parse → AST → eval récursif).

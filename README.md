@@ -114,7 +114,7 @@ Descriptors `0`, `1`, and `2` are open at startup for standard input, standard o
 
 ```lisp
 (@ "https://example.com" "GET")
-(@ "https://example.com/api" "POST" {"name":"Yvan"})
+(@ "https://example.com/api" "POST" {name:"Yvan"})
 (@ "https://example.com/api" "POST" "hello") ; sends the JSON string "hello"
 ```
 
