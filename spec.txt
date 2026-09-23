@@ -36,16 +36,16 @@ Les symboles `t`, `f`, `_`, `NaN`, `Inf` et `-Inf` sont des littéraux réservé
   `le`, `ge`, `bit-and`, `bit-or`, `bit-xor`, `bit-not`, `bit-shl` et `bit-shr`. Leurs
   arguments sont évalués puis l'opération est appliquée selon les règles d'arité de §6 et de
   typage de §8–§10.
-* Les builtins d'interaction sont : `io/open`, `io/read`, `io/write`, `io/close`, `@`, `$` et `~`.
+* Les builtins d'interaction sont : `@`, `$` et `~`. Le module natif `io` expose
+  `io.open`, `io.read`, `io.write` et `io.close` après `(use "io")`.
   `@` effectue des requêtes HTTP synchrones décrites en §13.1, `$` effectue l'interpolation
   décrite en §14 et `~` la correspondance décrite en §15.
 * Ces noms sont reconnus par leur orthographe exacte lorsqu'ils sont en tête d'un appel.
   Une liaison portant le même nom ne remplace donc pas ce builtin dans cette position. Les
   noms peuvent toutefois être utilisés comme noms de liaison dans les autres contextes,
   sous réserve des littéraux réservés ci-dessus.
-* Les noms `io/open`, `io/read`, `io/write` et `io/close` contiennent `/` et constituent des
-  symboles intégrés malgré la règle générale des identifiants ; ils ne sont pas des accès de
-  champ.
+* Les opérations `io.open`, `io.read`, `io.write` et `io.close` sont des champs du module
+  natif `io`, et suivent la représentation des descripteurs appelables.
 * `use "str"` charge statiquement un module natif par string. Dans `use nom`, l'expression
   `nom` est évaluée normalement puis sa valeur string sert à la recherche dynamique du module ;
   un symbole `str` non lié produit donc NameError. La forme `(use (let nom valeur))` définit
@@ -114,12 +114,13 @@ postfix-access := field-access ("[" selector "]")*
 (let user {name:"Yvan"})
 (let n (^ user.name))
 (set n "Nouveau")
-(io/write 1 ($ "%s" user.name))   ; "Nouveau"
+(use "io")
+(io.write 1 ($ "%s" user.name))   ; "Nouveau"
 
 (let nums [1 2 3])
 (let push-zero (fn (a) (set a[1] 0)))
 (push-zero ^nums)
-(io/write 1 ($ "%d" nums[1]))      ; 0 (mutation en place du tableau)
+(io.write 1 ($ "%d" nums[1]))      ; 0 (mutation en place du tableau)
 * eq déréférence transparemment : comparer une référence à une valeur compare les valeurs pointées, pas des adresses (le langage n'expose aucune notion d'identité de pointeur ailleurs).
 
 8. Arithmétique
@@ -166,14 +167,15 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 * continue : uniquement valide dans une loop. Hors d'une loop → ContinueOutsideLoop. Ne prend pas de valeur.
 
 13. IO
-* `io/open` ouvre un fichier et retourne un descripteur entier. Modes supportés : `r`, `r+`,
-  `w`, `w+`, `a` et `a+`. Les descripteurs 0, 1 et 2 correspondent respectivement à stdin,
+* `io.open` reçoit une URI `file:` dont le paramètre de requête `mode` vaut `r`, `r+`, `w`,
+  `w+`, `a` ou `a+`, puis retourne un descripteur entier. Les descripteurs 0, 1 et 2
+  correspondent respectivement à stdin,
   stdout et stderr ; les fichiers ouverts reçoivent des descripteurs à partir de 3.
-* `io/read fd` lit une ligne sans son retour à la ligne et retourne une string ; à EOF, retourne
+* `io.read fd` lit une ligne sans son retour à la ligne et retourne une string ; à EOF, retourne
   `_`. Les descripteurs non lisibles et invalides produisent IOError.
-* `io/write fd valeur` écrit une string et retourne le nombre d'octets écrits. Les descripteurs
+* `io.write fd valeur` écrit une string et retourne le nombre d'octets écrits. Les descripteurs
   non inscriptibles et invalides produisent IOError.
-* `io/close fd` ferme un descripteur et retourne `t` s'il était ouvert, sinon `f`.
+* `io.close fd` ferme un descripteur et retourne `t` s'il était ouvert, sinon `f`.
 * Les erreurs de système de fichiers et les entrées UTF-8 invalides produisent IOError.
 
 13.1 HTTP
@@ -201,6 +203,9 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
   à largeur fixe. Les valeurs négatives utilisent leur représentation en complément à deux,
   tronquée à la largeur demandée.
 * `%h` exige un integer et produit son écriture hexadécimale minuscule, sans préfixe `0x`.
+  `%8h`, `%16h`, `%32h` et `%64h` produisent une écriture hexadécimale à largeur fixe de
+  8, 16, 32 ou 64 bits (2, 4, 8 ou 16 chiffres) ; les valeurs négatives utilisent le
+  complément à deux tronqué à la largeur demandée.
 * `%o` exige un integer et produit son écriture octale, sans préfixe `0o`.
 * `%f` accepte un integer ou un float et produit une valeur numérique rendue en Float.
 * `%j` accepte les valeurs sérialisables en JSON et produit une string JSON compacte ; les clés

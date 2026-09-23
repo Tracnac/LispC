@@ -108,14 +108,15 @@ is represented by `_`. On failure it returns `f` and leaves an existing binding 
 
 ## File IO
 
-`io/open` accepts `fopen`-style mode strings: `r`, `r+`, `w`, `w+`, `a`, and `a+`. It returns an integer file descriptor. `io/read` reads one UTF-8 line without its EOL and returns `_` at EOF; `io/write` writes a string and returns its byte count; `io/close` returns `t` when it closes an open descriptor and `f` otherwise.
+Load the native `io` module with `(use "io")`. `io.open` accepts file URIs whose `mode` query parameter is one of `r`, `r+`, `w`, `w+`, `a`, or `a+`. It returns an integer file descriptor. `io.read` reads one UTF-8 line without its EOL and returns `_` at EOF; `io.write` writes a string and returns its byte count; `io.close` returns `t` when it closes an open descriptor and `f` otherwise.
 
-Descriptors `0`, `1`, and `2` are open at startup for standard input, standard output, and standard error. Files opened through `io/open` receive descriptors beginning at `3`. Bind descriptors with a `#`-prefixed name and use that name with `io/read`, `io/write`, and `io/close`.
+Descriptors `0`, `1`, and `2` are open at startup for standard input, standard output, and standard error. Files opened through `io.open` receive descriptors beginning at `3`. Bind descriptors with a `#`-prefixed name and use that name with `io.read`, `io.write`, and `io.close`.
 
 ```lisp
-(let #fd (io/open "w" "greeting.txt"))
-(io/write #fd ($ "Hello, %s\\n" "world"))
-(io/close #fd)
+(use "io")
+(let fd (io.open "file:greeting.txt?mode=w"))
+(io.write fd ($ "Hello, %s\\n" "world"))
+(io.close fd)
 ```
 
 ## HTTP
