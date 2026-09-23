@@ -1,1 +1,19 @@
-Namespace as struct...
+; Namespace as struct...
+
+(let io-module {
+  "open": ''
+  "read": ''
+  "write":'()', "spec":{
+    "documentation": "Do an IO operation to file..."
+    "arity": 3
+  }
+  "seek": ''
+  "close": ''
+  "open": ''
+})
+
+(io/write 1 ($ "%s\n" io-module.write))
+
+; Change internal struct construction...
+
+; (let identity {name: "", login: "", password:""})

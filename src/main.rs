@@ -82,9 +82,15 @@ enum ExprKind {
     Index(Box<Expr>, IndexSpec),
     Ref(Box<Expr>),
     Array(Vec<Expr>),
-    Struct(Vec<(String, Expr)>),
+    Struct(Vec<StructField>),
     Call(Box<Expr>, Vec<Expr>),
     Block(Vec<Expr>),
+}
+#[derive(Clone, Debug)]
+struct StructField {
+    key: String,
+    value: Expr,
+    span: Span,
 }
 #[derive(Clone, Debug)]
 enum Literal {
@@ -597,15 +603,19 @@ impl Parser {
             let key = match self.take() {
                 Some(Tok {
                     kind: TokKind::Str(x),
-                    ..
-                }) => x,
+                    span,
+                }) => (x, span),
                 _ => return Err(Error::Parse("struct key must be string".into())),
             };
             if self.take().map(|t| t.kind) != Some(TokKind::Colon) {
                 return Err(Error::Parse("expected : after struct key".into()));
             }
             let val = self.form()?;
-            v.push((key, val));
+            v.push(StructField {
+                key: key.0,
+                value: val,
+                span: key.1,
+            });
         }
         let end = self.take().unwrap().span.end;
         Ok(Expr {
@@ -854,13 +864,19 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
         ExprKind::Struct(xs) => {
             let mut seen = HashSet::new();
             let mut v = vec![];
-            for (k, x) in xs {
-                if !seen.insert(k) {
-                    return Err(Error::DuplicateKey(k.clone()).into());
+            for field in xs {
+                if !seen.insert(&field.key) {
+                    LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(field.span));
+                    return Err(Error::DuplicateKey(field.key.clone()).into());
                 }
                 v.push((
-                    k.clone(),
-                    Rc::new(RefCell::new(eval(x, env, loop_depth, match_depth)?)),
+                    field.key.clone(),
+                    Rc::new(RefCell::new(eval(
+                        &field.value,
+                        env,
+                        loop_depth,
+                        match_depth,
+                    )?)),
                 ))
             }
             Ok(Value::Struct(Rc::new(RefCell::new(v))))
@@ -2415,6 +2431,19 @@ mod tests {
             run("{\"x\": 1 \"x\": 2}"),
             Err(Error::DuplicateKey(_))
         ));
+    }
+
+    #[test]
+    fn duplicate_struct_key_diagnostic_points_at_duplicate_key() {
+        let source = "(let value {\n  \"x\": 1\n  \"x\": 2\n})";
+        let error = match run(source) {
+            Err(error) => error,
+            Ok(_) => panic!("expected duplicate key error"),
+        };
+        let span = LAST_ERROR_SPAN.with(|span| *span.borrow());
+        let rendered = diagnostic(&error, source, "sample.lisp", span);
+        assert!(rendered.starts_with("sample.lisp:3:3:"));
+        assert!(rendered.contains("  \"x\": 2"));
     }
 
     #[test]
