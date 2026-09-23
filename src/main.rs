@@ -97,6 +97,7 @@ enum Error {
     Format(String),
     Regex(String),
     DuplicateKey(String),
+    DuplicateBinding(String),
     Expect(String),
     Match,
     ContinueOutsideLoop,
@@ -116,10 +117,11 @@ impl fmt::Display for Error {
             Format(s) => write!(f, "FormatError: {s}"),
             Regex(s) => write!(f, "InvalidRegex: {s}"),
             DuplicateKey(s) => write!(f, "DuplicateKeyError: {s}"),
+            DuplicateBinding(s) => write!(f, "DuplicateBindingError: {s}"),
             Expect(s) => write!(f, "ExpectationError: {s}"),
             Match => write!(f, "MatchError: no predicate matched"),
             ContinueOutsideLoop => write!(f, "ContinueOutsideLoop"),
-            BreakOutside => write!(f, "BreakOutsideLoopOrMatch"),
+            BreakOutside => write!(f, "BreakOutsideLoop"),
             Interrupted => write!(f, "Interrupted"),
         }
     }
@@ -282,8 +284,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
             });
             continue;
         }
-        // A dot between digits belongs to a float; other dots remain field
-        // separators, so `1.0` and `profile.name` can coexist.
+
         if c.is_ascii_digit()
             || matches!(c, '+' | '-') && cs.get(i + 1).is_some_and(|next| next.is_ascii_digit())
         {
@@ -653,48 +654,40 @@ fn follow(mut c: Cell) -> Result<Cell, Error> {
     }
 }
 fn value_references_cell(value: &Value, target: &Cell) -> bool {
-    fn visit(
-        value: &Value,
-        target: &Cell,
-        cells: &mut HashSet<usize>,
-        arrays: &mut HashSet<usize>,
-        structs: &mut HashSet<usize>,
-    ) -> bool {
-        match value {
-            Value::Ref(cell) => {
-                if Rc::ptr_eq(cell, target) {
-                    return true;
-                }
-                let identity = Rc::as_ptr(cell) as usize;
-                cells.insert(identity) && visit(&cell.borrow(), target, cells, arrays, structs)
-            }
+    fn visit(cell: &Cell, target: &Cell, visited: &mut HashSet<usize>) -> bool {
+        let identity = Rc::as_ptr(cell) as usize;
+        if !visited.insert(identity) {
+            return false;
+        }
+        if Rc::ptr_eq(cell, target) {
+            return true;
+        }
+        match &*cell.borrow() {
+            Value::Ref(next) => visit(next, target, visited),
             Value::Array(values) => {
-                let identity = Rc::as_ptr(values) as usize;
-                arrays.insert(identity)
-                    && values
-                        .borrow()
-                        .iter()
-                        .any(|cell| visit(&cell.borrow(), target, cells, arrays, structs))
+                let cells: Vec<Cell> = values.borrow().iter().cloned().collect();
+                cells.iter().any(|cell| visit(cell, target, visited))
             }
             Value::Struct(fields) => {
-                let identity = Rc::as_ptr(fields) as usize;
-                structs.insert(identity)
-                    && fields
-                        .borrow()
-                        .iter()
-                        .any(|(_, cell)| visit(&cell.borrow(), target, cells, arrays, structs))
+                let cells: Vec<Cell> = fields.borrow().iter().map(|(_, c)| c.clone()).collect();
+                cells.iter().any(|cell| visit(cell, target, visited))
             }
             _ => false,
         }
     }
-
-    visit(
-        value,
-        target,
-        &mut HashSet::new(),
-        &mut HashSet::new(),
-        &mut HashSet::new(),
-    )
+    let mut visited = HashSet::new();
+    match value {
+        Value::Ref(cell) => visit(cell, target, &mut visited),
+        Value::Array(values) => {
+            let cells: Vec<Cell> = values.borrow().iter().cloned().collect();
+            cells.iter().any(|cell| visit(cell, target, &mut visited))
+        }
+        Value::Struct(fields) => {
+            let cells: Vec<Cell> = fields.borrow().iter().map(|(_, c)| c.clone()).collect();
+            cells.iter().any(|cell| visit(cell, target, &mut visited))
+        }
+        _ => false,
+    }
 }
 fn copy(v: &Value) -> Value {
     match v {
@@ -1042,6 +1035,9 @@ fn define_let(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<(String
     } else {
         return Err(Error::Type("let name must be an identifier".into()).into());
     };
+    if env.borrow().values.iter().any(|(k, _)| k == &name) {
+        return Err(Error::DuplicateBinding(name).into());
+    }
     let mut value = eval(&args[1], env, l, m)?;
     if let Value::Function(function) = &mut value {
         if let Some(function) = Rc::get_mut(function) {
@@ -1142,7 +1138,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 }
             }
             "break" => {
-                if l == 0 && m == 0 {
+                if l == 0 {
                     return Err(Error::BreakOutside.into());
                 }
                 if args.len() > 1 {
@@ -1170,12 +1166,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 }
                 for p in args.chunks(2) {
                     match eval(&p[0], env, l, m + 1) {
-                        Ok(v) if truth(&v) => {
-                            return match eval(&p[1], env, l, m + 1) {
-                                Err(Flow::Break(v)) => Ok(v),
-                                x => x,
-                            }
-                        }
+                        Ok(v) if truth(&v) => return eval(&p[1], env, l, m + 1),
                         Ok(_) => {}
                         Err(x) => return Err(x),
                     }
@@ -1854,14 +1845,23 @@ fn builtin(name: &str, vs: Vec<Value>) -> Result<Value, Error> {
         }
         "lt" | "gt" | "le" | "ge" => {
             let ordered = vs.windows(2).try_fold(true, |_, pair| {
-                let (_, left) = numeric(pair[0].clone()).map_err(flow_err)?;
-                let (_, right) = numeric(pair[1].clone()).map_err(flow_err)?;
-                Ok::<_, Error>(match name {
-                    "lt" => left < right,
-                    "gt" => left > right,
-                    "le" => left <= right,
-                    _ => left >= right,
-                })
+                let (left_int, left_float) = numeric(pair[0].clone()).map_err(flow_err)?;
+                let (right_int, right_float) = numeric(pair[1].clone()).map_err(flow_err)?;
+                let result = match (left_int, right_int) {
+                    (Some(left), Some(right)) => match name {
+                        "lt" => left < right,
+                        "gt" => left > right,
+                        "le" => left <= right,
+                        _ => left >= right,
+                    },
+                    _ => match name {
+                        "lt" => left_float < right_float,
+                        "gt" => left_float > right_float,
+                        "le" => left_float <= right_float,
+                        _ => left_float >= right_float,
+                    },
+                };
+                Ok::<_, Error>(result)
             })?;
             Ok(Value::Bool(ordered))
         }

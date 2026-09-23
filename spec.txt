@@ -74,12 +74,19 @@ postfix-access := field-access ("[" selector "]")*
 
 4. let / set
 * Les deux évaluent strictement leur expression valeur.
-* let crée toujours une nouvelle liaison dans le scope courant (le () englobant le plus proche).
-* set modifie une liaison existante, en remontant la chaîne de scopes jusqu'à la trouver. Erreur NameError si le nom n'existe nulle part.
+* let crée une nouvelle liaison dans le scope courant — le () englobant le plus proche, ou le
+  scope de haut niveau du programme. Si le nom est déjà lié dans CE même scope lexical, erreur
+  DuplicateBindingError : pas de re-liaison silencieuse. L'ombre portée (shadowing) d'une liaison
+  d'un scope parent reste autorisée.
+* set modifie une liaison existante, en remontant la chaîne de scopes jusqu'à la trouver ; il ne
+  crée jamais de nouvelle liaison. Erreur NameError si le nom n'existe nulle part.
 
 5. Scopes
-* Seul () introduit un nouveau scope lexical.
-* loop : un seul scope créé à l'entrée, réutilisé à chaque itération (pas de nouveau scope par tour), nécessaire pour que (set x (sub x 1)) accumule d'un tour à l'autre.
+* Seul () introduit un nouveau scope lexical ; le haut niveau du programme est lui aussi un scope.
+* loop : un seul scope créé à l'entrée, réutilisé à chaque itération (pas de nouveau scope par
+  tour), nécessaire pour que (set x (sub x 1)) accumule d'un tour à l'autre. Conséquence : un
+  (let ...) rejoué à chaque tour dans le corps du loop est un doublon (DuplicateBindingError).
+  Pour lier de nouvelles variables à chaque tour, ouvrir un () dans le corps.
 * fn : chaque appel crée un nouveau scope où les paramètres sont liés ; ce scope a pour parent le scope lexical où le fn a été défini (lexical scoping, pas dynamique).
 * Les closures capturent l'environnement par référence : set depuis une closure mute bien la variable extérieure. C'est ce qui permet la récursion (le nom se résout au moment de l'appel, pas de la définition) et les compteurs mutables.
 
@@ -163,8 +170,15 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 * Aucune paire ne matche et pas de t final → MatchError: no predicate matched (fail-fast plutôt que null silencieux).
 
 12. loop / break / continue
-* break valeur fait évaluer la loop (ou le match) entière à valeur. break seul → _.
-* continue : uniquement valide dans une loop. Hors d'une loop → ContinueOutsideLoop. Ne prend pas de valeur.
+* break a pour seule cible une loop. break valeur fait évaluer la loop entière à
+  valeur ; break seul → _. Un break situé dans un match imbriqué dans une loop
+  sort de la loop (le match est traversé, il n'est pas une cible de break). Hors
+  de toute loop, break est une erreur BreakOutsideLoop, même à l'intérieur d'un
+  match. Un break dans un match situé dans une fonction appelée depuis une loop ne
+  sort que de la fonction (les boundaries de scopes de fn s'appliquent comme pour
+  la profondeur de loop).
+* continue : uniquement valide dans une loop. Hors d'une loop → ContinueOutsideLoop (même
+  dans un match). Ne prend pas de valeur.
 
 13. IO
 * `io.open` reçoit une URI `file:` dont le paramètre de requête `mode` vaut `r`, `r+`, `w`,
@@ -240,8 +254,8 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 
 16. Erreurs
 Catégories : ParseError, NameError, TypeError, ArityError, MathError (div/0, overflow), IOError,
-FormatError, InvalidRegex, DuplicateKeyError, MatchError, ContinueOutsideLoop,
-BreakOutsideLoopOrMatch et Interrupted.
+FormatError, InvalidRegex, DuplicateKeyError, DuplicateBindingError, MatchError, ContinueOutsideLoop,
+BreakOutsideLoop et Interrupted.
 Les erreurs de formatage conservent les sous-messages `FormatArityError` et `FormatTypeError`.
 Pas de try/catch dans la spec → fail-fast : la première erreur stoppe le programme, message sur stderr, exit code non nul.
 Les erreurs de parsing et d'exécution affichent le fichier, la ligne, la colonne, la ligne source
