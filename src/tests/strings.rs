@@ -1,0 +1,451 @@
+use super::{check, run};
+use crate::*;
+
+#[test]
+fn strings_support_grapheme_indexing_and_string_slices() {
+    let value = run(r#"(let s "😀abc")
+               (expect s[1] "😀")
+               (expect s[2] "a")
+               (expect s[-1] "c")
+               (expect s[1..2] "😀a")
+               (expect s[..2] "😀a")
+               (expect s[3..] "bc")
+               (expect s[-2..-1] "bc")
+               (expect s[[1 3]] ["😀" "b"])
+               (expect "é👩‍🚀"[1] "é")
+               (expect ""[..] "")"#)
+    .unwrap();
+    assert!(matches!(value, Value::Bool(true)));
+}
+
+#[test]
+fn string_index_errors_match_collection_rules() {
+    assert!(matches!(
+        run(r#""abc"[0]"#),
+        Err(Error::Type(message)) if message.contains("1-based")
+    ));
+    assert!(matches!(
+        run(r#""abc"[4]"#),
+        Err(Error::Name(message)) if message.contains("out of bounds")
+    ));
+    assert!(matches!(
+        run(r#""abc"[1.0]"#),
+        Err(Error::Type(message)) if message.contains("integer")
+    ));
+}
+
+#[test]
+fn regex_returns_and_binds_captures() {
+    let value = run(r#"(let string "Hello the world")
+               (~ "^Hello(.*)$" string match)
+               (expect match ["Hello the world" " the world"])"#)
+    .unwrap();
+    assert!(matches!(value, Value::Bool(true)));
+}
+
+#[test]
+fn regex_preserves_multiple_and_optional_captures() {
+    let value = run(r#"(let match _)
+               (~ "^(a)(b)?(c)$" "ac" match)
+               (expect match ["ac" "a" _ "c"])"#)
+    .unwrap();
+    assert!(matches!(value, Value::Bool(true)));
+}
+
+#[test]
+fn regex_failure_does_not_overwrite_binding() {
+    let value = run(r#"(let match ["unchanged"])
+               (expect (~ "^a+$" "bbb" match) f)
+               (expect match ["unchanged"])"#)
+    .unwrap();
+    assert!(matches!(value, Value::Bool(true)));
+}
+
+#[test]
+fn regex_reports_invalid_patterns_and_requires_strings() {
+    assert!(matches!(
+        run(r#"(~ "(" "text" match)"#),
+        Err(Error::Regex(message)) if message.contains("invalid regex")
+    ));
+    assert!(matches!(
+        run(r#"(~ "^a$" 1 match)"#),
+        Err(Error::Type(message)) if message == "expected string"
+    ));
+    assert!(matches!(
+        run(r#"(~ "^a$" "a" [match])"#),
+        Err(Error::Type(message)) if message.contains("binding")
+    ));
+}
+
+#[test]
+fn regex_binding_follows_nested_scope_rules() {
+    let value = run(r#"(let match ["outer"])
+               (let result
+                 ((~ "^(a)$" "a" match)
+                  match))
+               (expect result ["a" "a"])
+               (expect match ["a" "a"])"#)
+    .unwrap();
+    assert!(matches!(value, Value::Bool(true)));
+}
+
+#[test]
+fn formatting_supports_integer_bases_json_and_debug_output() {
+    let value = run("($ \"%b %h %o\" 10 255 8)").unwrap();
+    assert!(matches!(value, Value::Str(text) if text == "1010 ff 10"));
+
+    let value = run("($ \"%8h %16h %32h %64h\" 255 255 255 255)").unwrap();
+    assert!(matches!(
+        value,
+        Value::Str(text) if text == "ff 00ff 000000ff 00000000000000ff"
+    ));
+
+    let value = run("($ \"%8h %16h %32h %64h\" -1 -1 -1 -1)").unwrap();
+    assert!(matches!(
+        value,
+        Value::Str(text) if text == "ff ffff ffffffff ffffffffffffffff"
+    ));
+
+    let value = run("($ \"%8b %16b %32b %64b\" 5 5 5 5)").unwrap();
+    assert!(
+        matches!(value, Value::Str(text) if text == "00000101 0000000000000101 00000000000000000000000000000101 0000000000000000000000000000000000000000000000000000000000000101")
+    );
+
+    let value = run("($ \"%t %t\" 1 [1])").unwrap();
+    assert!(matches!(value, Value::Str(text) if text == "int array"));
+
+    let value = run(r#"($ "%s" {name:"Yvan" contact:{gsm:"0102030405"} score:["ok" 2]})"#).unwrap();
+    assert!(
+        matches!(value, Value::Str(text) if text == r#"{name:"Yvan" contact:{gsm:"0102030405"} score:["ok" 2]}"#)
+    );
+
+    let value = run("($ \"%j\" {name: \"Ada\" values: [1 t _]})").unwrap();
+    assert!(
+        matches!(value, Value::Str(text) if text == r#"{"name":"Ada","values":[1,true,null]}"#)
+    );
+
+    let value = run("($ \"%v\" {name: \"Ada\" values: [1 t _]})").unwrap();
+    assert!(
+        matches!(value, Value::Str(text) if text == r#"Struct({name: Str("Ada"), values: Array([Int(1), Bool(true), Null])})"#)
+    );
+
+    let value = run("($ \"%v\" [1 \"x\"])").unwrap();
+    assert!(matches!(value, Value::Str(text) if text == r#"Array([Int(1), Str("x")])"#));
+}
+
+#[test]
+fn format_type_and_value_of_null() {
+    check(r#"($ "%t:%s" _ _)"#, r#""null:""#);
+}
+
+#[test]
+fn format_type_and_value_of_true() {
+    check(r#"($ "%t:%s" t t)"#, r#""bool:true""#);
+}
+
+#[test]
+fn format_type_and_value_of_false() {
+    check(r#"($ "%t:%s" f f)"#, r#""bool:false""#);
+}
+
+#[test]
+fn format_type_and_value_of_zero() {
+    check(r#"($ "%t:%s" 0 0)"#, r#""int:0""#);
+}
+
+#[test]
+fn format_type_and_value_of_integer() {
+    check(r#"($ "%t:%s" 127 127)"#, r#""int:127""#);
+}
+
+#[test]
+fn format_type_and_value_of_negative_integer() {
+    check(r#"($ "%t:%s" -127 -127)"#, r#""int:-127""#);
+}
+
+#[test]
+fn format_type_and_value_of_hex_literal() {
+    check(r#"($ "%t:%s" 0x7F 127)"#, r#""int:127""#);
+}
+
+#[test]
+fn format_type_and_value_of_binary_literal() {
+    check(r#"($ "%t:%s" 0b01111111 127)"#, r#""int:127""#);
+}
+
+#[test]
+fn format_type_and_value_of_octal_literal() {
+    check(r#"($ "%t:%s" 0o177 127)"#, r#""int:127""#);
+}
+
+#[test]
+fn format_type_and_value_of_zero_float() {
+    check(r#"($ "%t:%s" 0.0 0.0)"#, r#""float:0""#);
+}
+
+#[test]
+fn format_type_and_value_of_float() {
+    check(r#"($ "%t:%s" 1.5 1.5)"#, r#""float:1.5""#);
+}
+
+#[test]
+fn format_type_and_value_of_negative_float() {
+    check(r#"($ "%t:%s" -1.5 -1.5)"#, r#""float:-1.5""#);
+}
+
+#[test]
+fn format_type_and_value_of_string() {
+    check(r#"($ "%t:%s" "text" "text")"#, r#""string:text""#);
+}
+
+#[test]
+fn format_type_and_value_of_array() {
+    check(r#"($ "%t:%s" [1 2 3] [1 2 3])"#, r#""array:[1 2 3]""#);
+}
+
+#[test]
+fn format_type_and_value_of_function() {
+    check(r#"($ "%t:%s" (fn (x) x) (fn (x) x))"#, r#""function:<fn>""#);
+}
+
+#[test]
+fn format_integer_as_binary() {
+    check(r#"($ "%b" 5)"#, r#""101""#);
+}
+
+#[test]
+fn format_binary_padded_to_eight() {
+    check(r#"($ "%8b" 5)"#, r#""00000101""#);
+}
+
+#[test]
+fn format_negative_binary_padded_to_eight() {
+    check(r#"($ "%8b" -5)"#, r#""11111011""#);
+}
+
+#[test]
+fn format_binary_padded_to_sixteen() {
+    check(r#"($ "%16b" 5)"#, r#""0000000000000101""#);
+}
+
+#[test]
+fn format_negative_binary_padded_to_sixteen() {
+    check(r#"($ "%16b" -5)"#, r#""1111111111111011""#);
+}
+
+#[test]
+fn format_binary_padded_to_thirty_two() {
+    check(r#"($ "%32b" 5)"#, r#""00000000000000000000000000000101""#);
+}
+
+#[test]
+fn format_binary_padded_to_sixty_four() {
+    check(
+        r#"($ "%64b" 5)"#,
+        r#""0000000000000000000000000000000000000000000000000000000000000101""#,
+    );
+}
+
+#[test]
+fn format_minus_one_binary_padded_to_eight() {
+    check(r#"($ "%8b" -1)"#, r#""11111111""#);
+}
+
+#[test]
+fn format_minus_one_binary_padded_to_sixteen() {
+    check(r#"($ "%16b" -1)"#, r#""1111111111111111""#);
+}
+
+#[test]
+fn format_decimal_hex_and_octal_rendering() {
+    check(r#"($ "%d %h %o" 127 127 127)"#, r#""127 7f 177""#);
+}
+
+#[test]
+fn format_mixed_specifiers_render_inline() {
+    check(r#"($ "%s %f %t" "text" 1.5 1.5)"#, r#""text 1.5 float""#);
+}
+
+#[test]
+fn format_struct_as_json() {
+    check(
+        r#"($ "%j" {name:"Ada" values:[1 t _]})"#,
+        r#""{\"name\":\"Ada\",\"values\":[1,true,null]}""#,
+    );
+}
+
+#[test]
+fn format_struct_with_debug_verb() {
+    check(
+        r#"($ "%v" {name:"Ada" values:[1 t _]})"#,
+        r#""Struct({name: Str(\"Ada\"), values: Array([Int(1), Bool(true), Null])})""#,
+    );
+}
+
+#[test]
+fn format_array_with_debug_verb() {
+    check(
+        r#"($ "%v" [1 "text"])"#,
+        r#""Array([Int(1), Str(\"text\")])""#,
+    );
+}
+
+#[test]
+fn format_escaped_percent_sign() {
+    check(r#"($ "100%%")"#, r#""100%""#);
+}
+
+#[test]
+fn format_type_and_value_of_nan() {
+    check(r#"($ "%t:%s" NaN NaN)"#, r#""float:NaN""#);
+}
+
+#[test]
+fn format_type_and_value_of_infinity() {
+    check(r#"($ "%t:%s" Inf Inf)"#, r#""float:Inf""#);
+}
+
+#[test]
+fn format_type_and_value_of_negative_infinity() {
+    check(r#"($ "%t:%s" -Inf -Inf)"#, r#""float:-Inf""#);
+}
+
+#[test]
+fn format_d_renders_add_result() {
+    check(r#"($ "%d" (add 2 3))"#, r#""5""#);
+}
+
+#[test]
+fn format_d_renders_sub_result() {
+    check(r#"($ "%d" (sub 10 3))"#, r#""7""#);
+}
+
+#[test]
+fn format_d_renders_mul_result() {
+    check(r#"($ "%d" (mul 6 7))"#, r#""42""#);
+}
+
+#[test]
+fn format_d_renders_div_result() {
+    check(r#"($ "%d" (div 10 2))"#, r#""5""#);
+}
+
+#[test]
+fn format_d_renders_integer_division() {
+    check(r#"($ "%d" (div 7 2))"#, r#""3""#);
+}
+
+#[test]
+fn format_d_renders_negative_mod_result() {
+    check(r#"($ "%d" (mod -7 2))"#, r#""-1""#);
+}
+
+#[test]
+fn format_d_renders_pow_result() {
+    check(r#"($ "%d" (pow 2 10))"#, r#""1024""#);
+}
+
+#[test]
+fn format_f_renders_float_division() {
+    check(r#"($ "%f" (div 7.0 2.0))"#, r#""3.5""#);
+}
+
+#[test]
+fn format_f_renders_float_addition() {
+    check(r#"($ "%f" (add 1.5 2.0))"#, r#""3.5""#);
+}
+
+#[test]
+fn format_f_renders_float_subtraction() {
+    check(r#"($ "%f" (sub 5.5 2.0))"#, r#""3.5""#);
+}
+
+#[test]
+fn format_f_renders_float_multiplication() {
+    check(r#"($ "%f" (mul 1.75 2.0))"#, r#""3.5""#);
+}
+
+#[test]
+fn format_f_renders_float_power() {
+    check(r#"($ "%f" (pow 1.5 2.0))"#, r#""2.25""#);
+}
+
+#[test]
+fn format_f_renders_negative_operand_addition() {
+    check(r#"($ "%f" (add -1.5 2.0))"#, r#""0.5""#);
+}
+
+#[test]
+fn format_f_renders_negative_operand_subtraction() {
+    check(r#"($ "%f" (sub -1.5 2.0))"#, r#""-3.5""#);
+}
+
+#[test]
+fn format_f_renders_negative_operand_multiplication() {
+    check(r#"($ "%f" (mul -1.5 2.0))"#, r#""-3""#);
+}
+
+#[test]
+fn format_f_renders_negative_operand_division() {
+    check(r#"($ "%f" (div -7.0 2.0))"#, r#""-3.5""#);
+}
+
+#[test]
+fn format_type_of_integer_plus_float_is_float() {
+    check(r#"($ "%t:%s" (add 1 2.5) (add 1 2.5))"#, r#""float:3.5""#);
+}
+
+#[test]
+fn format_type_of_integer_minus_float_is_float() {
+    check(r#"($ "%t:%s" (sub 5 1.5) (sub 5 1.5))"#, r#""float:3.5""#);
+}
+
+#[test]
+fn format_type_of_integer_times_float_is_float() {
+    check(r#"($ "%t:%s" (mul 7 0.5) (mul 7 0.5))"#, r#""float:3.5""#);
+}
+
+#[test]
+fn format_type_of_integer_divided_by_float_is_float() {
+    check(r#"($ "%t:%s" (div 7 2.0) (div 7 2.0))"#, r#""float:3.5""#);
+}
+
+#[test]
+fn format_type_of_integer_division_is_integer() {
+    check(r#"($ "%t:%s" (div 7 2)   (div 7 2))"#, r#""int:3""#);
+}
+
+#[test]
+fn format_d_renders_bit_and_result() {
+    check(r#"($ "%d" (bit-and 0b110 0b101))"#, r#""4""#);
+}
+
+#[test]
+fn format_d_renders_bit_or_result() {
+    check(r#"($ "%d" (bit-or 0b110 0b101))"#, r#""7""#);
+}
+
+#[test]
+fn format_d_renders_bit_xor_result() {
+    check(r#"($ "%d" (bit-xor 0b110 0b101))"#, r#""3""#);
+}
+
+#[test]
+fn format_d_renders_bit_not_result() {
+    check(r#"($ "%d" (bit-not 0b101))"#, r#""-6""#);
+}
+
+#[test]
+fn format_d_renders_shift_left_result() {
+    check(r#"($ "%d" (bit-shl 1 4))"#, r#""16""#);
+}
+
+#[test]
+fn format_d_renders_shift_right_result() {
+    check(r#"($ "%d" (bit-shr 16 2))"#, r#""4""#);
+}
+
+#[test]
+fn regex_without_match_returns_false() {
+    check(r#"(~ "xxx" "hello" match)"#, r#"f"#);
+}
