@@ -1340,7 +1340,7 @@ fn validate_module(value: &Value) -> Result<(), Error> {
         return Err(Error::Type("module must be a struct".into()));
     };
     for (_, cell) in fields.borrow().iter() {
-        let Value::Struct(descriptor) = copy(&cell.borrow()) else {
+        let Value::Struct(descriptor) = cell.borrow().clone() else {
             return Err(Error::Type(
                 "module members must be callable descriptors".into(),
             ));
@@ -1359,7 +1359,12 @@ fn validate_descriptor_spec(
             .find(|(key, _)| key == name)
             .map(|(_, cell)| copy(&cell.borrow()))
     };
-    match field("_") {
+    let callable = fields
+        .borrow()
+        .iter()
+        .find(|(key, _)| key == "_")
+        .map(|(_, cell)| cell.borrow().clone());
+    match callable {
         Some(value) if is_callable(&value) => {}
         Some(_) => return Err(Error::Type("module descriptor _ must be callable".into())),
         None => return Err(Error::Type("module descriptor must contain _".into())),
@@ -1451,7 +1456,6 @@ fn validate_descriptor(
 fn is_callable(value: &Value) -> bool {
     match value {
         Value::Function(_) | Value::NativeFunction(_) => true,
-        Value::Ref(cell) => is_callable(&cell.borrow()),
         _ => false,
     }
 }
@@ -1480,7 +1484,6 @@ fn invoke(f: Value, vals: Vec<Value>, call_span: Span) -> EResult {
         Value::NativeFunction(f) => {
             return (f.call)(vals).map_err(Into::into);
         }
-        Value::Ref(c) => return invoke(copy(&c.borrow()), vals, call_span),
         _ => return Err(Error::Type("value is not callable".into()).into()),
     };
     if f.params.len() != vals.len() {
@@ -2530,6 +2533,24 @@ mod tests {
         let value =
             run("(let a [1 2]) (let setzero (fn (x) (set x[1] 0))) (setzero ^a) a[1]").unwrap();
         assert!(matches!(value, Value::Int(0)));
+    }
+
+    #[test]
+    fn references_are_not_callable() {
+        assert!(matches!(
+            run("(let a {value: \"Hello\"}) (^a)"),
+            Ok(Value::Ref(_))
+        ));
+        let function = Value::Function(Rc::new(Function {
+            params: vec![],
+            body: Expr {
+                kind: ExprKind::Lit(Literal::Null),
+                span: Span { start: 0, end: 0 },
+            },
+            env: new_env(None),
+            name: None,
+        }));
+        assert!(!is_callable(&Value::Ref(Rc::new(RefCell::new(function)))));
     }
 
     #[test]
