@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     fs::{File, OpenOptions},
-    io::{self, Read, Write},
+    io::{self, BufRead, BufReader, Write},
     rc::Rc,
 };
 
@@ -13,8 +13,22 @@ pub(crate) struct FileTable {
     pub(crate) files: HashMap<i64, FileHandle>,
 }
 
+/// A file opened for reading. The buffered reader is owned by the handle for
+/// its whole lifetime, so data prefetched by one read stays available to the
+/// next read on the same descriptor (and to future read-byte/read-line-style
+/// operations).
+pub(crate) struct ReadableStream {
+    reader: BufReader<File>,
+    writable: bool,
+}
+
 pub(crate) enum FileHandle {
-    File(File),
+    /// File opened for reading (`r`, `r+`, `w+`, `a+`); `writable` is true for
+    /// the read/write modes so `io.write` reaches the same underlying file
+    /// below the reader's buffer instead of through a second wrapper.
+    Read(ReadableStream),
+    /// File opened for writing only (`w`, `a`).
+    Write(File),
     Stdin,
     Stdout,
     Stderr,
@@ -134,13 +148,31 @@ fn open(args: Vec<Value>) -> Result<Value, Error> {
         .find_map(|parameter| parameter.strip_prefix("mode="))
         .ok_or_else(|| Error::Io("file URI is missing mode".into()))?;
     let mut options = OpenOptions::new();
-    match mode {
-        "r" => options.read(true),
-        "r+" => options.read(true).write(true),
-        "w" => options.write(true).create(true).truncate(true),
-        "w+" => options.read(true).write(true).create(true).truncate(true),
-        "a" => options.append(true).create(true),
-        "a+" => options.read(true).append(true).create(true),
+    let readable = match mode {
+        "r" => {
+            options.read(true);
+            true
+        }
+        "r+" => {
+            options.read(true).write(true);
+            true
+        }
+        "w" => {
+            options.write(true).create(true).truncate(true);
+            false
+        }
+        "w+" => {
+            options.read(true).write(true).create(true).truncate(true);
+            true
+        }
+        "a" => {
+            options.append(true).create(true);
+            false
+        }
+        "a+" => {
+            options.read(true).append(true).create(true);
+            true
+        }
         _ => return Err(Error::Io(format!("unsupported open mode `{mode}`"))),
     };
     let file = options.open(path).map_err(|e| Error::Io(e.to_string()))?;
@@ -148,7 +180,16 @@ fn open(args: Vec<Value>) -> Result<Value, Error> {
         let mut files = files.borrow_mut();
         let fd = files.next_fd;
         files.next_fd += 1;
-        files.files.insert(fd, FileHandle::File(file));
+        let handle = if readable {
+            FileHandle::Read(ReadableStream {
+                reader: BufReader::new(file),
+                // Only `r` lacks write access among the readable modes.
+                writable: mode != "r",
+            })
+        } else {
+            FileHandle::Write(file)
+        };
+        files.files.insert(fd, handle);
         fd
     });
     Ok(Value::Int(fd))
@@ -174,8 +215,11 @@ fn read(args: Vec<Value>) -> Result<Value, Error> {
             .get_mut(fd)
             .ok_or_else(|| Error::Io(format!("invalid file descriptor {fd}")))?;
         match handle {
-            FileHandle::File(file) => read_line(file),
-            FileHandle::Stdin => read_stdin_line(),
+            FileHandle::Read(stream) => read_line(&mut stream.reader),
+            FileHandle::Write(_) => {
+                Err(Error::Io(format!("file descriptor {fd} is not readable")))
+            }
+            FileHandle::Stdin => read_line(&mut io::stdin().lock()),
             FileHandle::Stdout => Err(Error::Io("file descriptor 1 is not readable".into())),
             FileHandle::Stderr => Err(Error::Io("file descriptor 2 is not readable".into())),
         }
@@ -183,36 +227,30 @@ fn read(args: Vec<Value>) -> Result<Value, Error> {
     Ok(line.map_or(Value::Null, Value::Str))
 }
 
-fn read_line(file: &mut File) -> Result<Option<String>, Error> {
-    check_interrupted()?;
-    let mut bytes = Vec::new();
-    let mut byte = [0; 1];
-    loop {
-        check_interrupted()?;
-        match file.read(&mut byte).map_err(|e| Error::Io(e.to_string()))? {
-            0 if bytes.is_empty() => return Ok(None),
-            0 => break,
-            1 if byte[0] == b'\n' => break,
-            1 => bytes.push(byte[0]),
-            _ => unreachable!(),
-        }
-    }
-    if bytes.last() == Some(&b'\r') {
-        bytes.pop();
-    }
-    String::from_utf8(bytes)
-        .map(Some)
-        .map_err(|_| Error::Io("input is not valid UTF-8".into()))
-}
-
-fn read_stdin_line() -> Result<Option<String>, Error> {
+/// Read one line through the handle's persistent buffered reader: `None` at
+/// EOF, otherwise the line without its terminator (LF, or CRLF as a unit).
+/// `read_line` keeps the underlying buffer filled, so the next read on the same
+/// descriptor continues without losing prefetched data.
+fn read_line<R: BufRead>(reader: &mut R) -> Result<Option<String>, Error> {
     check_interrupted()?;
     let mut line = String::new();
-    let bytes = io::stdin()
+    let bytes = reader
         .read_line(&mut line)
-        .map_err(|e| Error::Io(e.to_string()))?;
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::InvalidData => Error::Io("input is not valid UTF-8".into()),
+            _ => Error::Io(error.to_string()),
+        })?;
     check_interrupted()?;
-    Ok((bytes != 0).then(|| line.trim_end_matches(['\n', '\r']).to_string()))
+    if bytes == 0 {
+        return Ok(None);
+    }
+    if line.ends_with('\n') {
+        line.pop();
+    }
+    if line.ends_with('\r') {
+        line.pop();
+    }
+    Ok(Some(line))
 }
 
 fn write(args: Vec<Value>) -> Result<Value, Error> {
@@ -228,7 +266,13 @@ fn write(args: Vec<Value>) -> Result<Value, Error> {
             .get_mut(fd)
             .ok_or_else(|| Error::Io(format!("invalid file descriptor {fd}")))?;
         match handle {
-            FileHandle::File(file) => file.write_all(text.as_bytes()),
+            FileHandle::Read(stream) if stream.writable => {
+                stream.reader.get_mut().write_all(text.as_bytes())
+            }
+            FileHandle::Read(_) => {
+                return Err(Error::Io(format!("file descriptor {fd} is not writable")));
+            }
+            FileHandle::Write(file) => file.write_all(text.as_bytes()),
             FileHandle::Stdin => return Err(Error::Io("file descriptor 0 is not writable".into())),
             FileHandle::Stdout => io::stdout()
                 .write_all(text.as_bytes())

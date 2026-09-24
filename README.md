@@ -133,7 +133,15 @@ Control flow (`break`/`continue`) propagates out of the evaluated code.
 
 Load the native `io` module with `(use "io")`. `io.open` accepts file URIs whose `mode` query parameter is one of `r`, `r+`, `w`, `w+`, `a`, or `a+`. It returns an integer file descriptor. `io.read` reads one UTF-8 line without its EOL and returns `_` at EOF; `io.write` writes a string and returns its byte count; `io.close` returns `t` when it closes an open descriptor and `f` otherwise.
 
-Descriptors `0`, `1`, and `2` are open at startup for standard input, standard output, and standard error. Files opened through `io.open` receive descriptors beginning at `3`. Bind descriptors with a `#`-prefixed name and use that name with `io.read`, `io.write`, and `io.close`.
+Descriptors `0`, `1`, and `2` are open at startup for standard input, standard output, and standard error. Files opened through `io.open` receive descriptors beginning at `3`. 
+Each open file owns a buffered reader that lives in the descriptor for its whole lifetime, so
+repeated `io.read` calls on one descriptor reuse the same buffer and do not lose data the reader
+prefetched; the buffered stream stays bound to the descriptor for future reads. In `r`, reads
+only; in `r+`, `w+`, and `a+` the descriptor is both readable and writable, and in `r+`/`w+` a
+write lands at the current stream position while in `a+` it appends to the end of the file.
+`io.read` on a write-only descriptor, on `stdout`, or on `stderr` produces an IO
+error (e.g. `file descriptor 1 is not readable`); `io.write` on a read-only descriptor or on
+`stdin` produces an IO error. Bind descriptors with a `#`-prefixed name and use that name with `io.read`, `io.write`, and `io.close`.
 
 ```lisp
 (use "io")

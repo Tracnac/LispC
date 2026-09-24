@@ -197,6 +197,13 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
   stdout et stderr ; les fichiers ouverts reçoivent des descripteurs à partir de 3.
 * `io.read fd` lit une ligne sans son retour à la ligne et retourne une string ; à EOF, retourne
   `_`. Les descripteurs non lisibles et invalides produisent IOError.
+* Les lectures sont bufferisées et la mémoire tampon appartient au descripteur ouvert : les
+  données pré-lues par un `io.read` restent disponibles pour l'appel suivant sur le même
+  descripteur. `io.read` accepte les fins de ligne LF et CRLF (retirées comme une unité).
+* Pour les modes mixtes (`r+`, `w+`, `a+`), lectures et écritures partagent le même fichier et
+  la même position de flux ; une écriture se fait à la position courante, sauf `a+` qui écrit
+  toujours à la fin du fichier. Un descripteur en écriture seule (`w`, `a`) n'est pas lisible ;
+  un descripteur en lecture seule (`r`) n'est pas inscriptible.
 * `io.write fd valeur` écrit une string et retourne le nombre d'octets écrits. Les descripteurs
   non inscriptibles et invalides produisent IOError.
 * `io.close fd` ferme un descripteur et retourne `t` s'il était ouvert, sinon `f`.
