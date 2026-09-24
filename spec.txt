@@ -24,7 +24,7 @@ struct	{k1:v1 k2:v2 ...}, clés identifiants uniquement	Vec<(String, Value)> (or
 
 2. Identifiants
 Regex : [A-Za-z0-9_-]+, ASCII uniquement. Un identifiant ne peut pas commencer par un chiffre en pratique, le lexer doit essayer de parser un nombre en premier ; si ça échoue, il retombe sur un identifiant.
-Les symboles `t`, `f`, `_`, `NaN`, `Inf` et `-Inf` sont des littéraux réservés et ne peuvent pas être utilisés comme noms de liaison.
+Les symboles `t`, `f`, `_`, `NaN`, `+NaN`, `Inf`, `+Inf` et `-Inf` sont des littéraux réservés et ne peuvent pas être utilisés comme noms de liaison.
 
 2.1 Mots-clés et noms intégrés
 * Le lexer ne produit pas de token spécial pour les mots-clés : ils sont lexés comme des
@@ -150,7 +150,7 @@ Arithmétique	int+int→int, float+float→float, int+float→float (promotion).
 eq/ne	Comparaison numérique cross-type autorisée (5 == 5.0 → t). Types non numériques différents → f (jamais d'erreur).
 lt/gt/le/ge	Numérique uniquement, même règles de promotion que l'arithmétique. Types non numériques → TypeError.
 $ (%s)	Accepte tout type, stringification canonique (les clés de struct ne sont pas entourées de guillemets).
-$ (%d/%f)	%d exige un integer, %f accepte float ou integer promu.
+$ (%d/%f)	%d exige un integer, %f accepte float ou integer (integer rendu exactement, sans promotion Float).
 $ (%b/%h/%o)	Formats binaire, hexadécimal et octal ; `%8b`, `%16b`, `%32b` et `%64b`
 		sont les formats binaires à largeur fixe.
 $ (%j/%t/%v)	JSON, nom du type et représentation structurelle de debug.
@@ -221,7 +221,9 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
   8, 16, 32 ou 64 bits (2, 4, 8 ou 16 chiffres) ; les valeurs négatives utilisent le
   complément à deux tronqué à la largeur demandée.
 * `%o` exige un integer et produit son écriture octale, sans préfixe `0o`.
-* `%f` accepte un integer ou un float et produit une valeur numérique rendue en Float.
+* `%f` accepte un integer ou un float. Un integer est rendu exactement en décimal (aucune
+  conversion via Float, donc pas de perte de précision pour les grands entiers) ; un float est
+  rendu via sa représentation numérique.
 * `%j` accepte les valeurs sérialisables en JSON et produit une string JSON compacte ; les clés
   de struct sont des strings JSON entre guillemets :
   `_` devient `null`, `t`/`f` deviennent `true`/`false`, les structs ont des clés

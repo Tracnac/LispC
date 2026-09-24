@@ -367,12 +367,23 @@ fn number(s: &str) -> Result<Option<TokKind>, Error> {
         if d.is_empty() {
             return Ok(None);
         }
-        let v = i64::from_str_radix(d, base)
+        let magnitude = u64::from_str_radix(d, base)
             .map_err(|_| Error::Parse(format!("invalid number `{s}`")))?;
-        return Ok(Some(TokKind::Int(
-            v.checked_mul(sign)
-                .ok_or_else(|| Error::Parse("integer out of range".into()))?,
-        )));
+        // -2^63 is representable even though its magnitude overflows i64,
+        // mirroring the decimal `-9223372036854775808`.
+        let value = if sign < 0 && magnitude == 1u64 << 63 {
+            i64::MIN
+        } else if sign < 0 {
+            i64::try_from(magnitude)
+                .ok()
+                .and_then(|m| m.checked_mul(sign))
+                .ok_or_else(|| Error::Parse("integer out of range".into()))?
+        } else {
+            i64::try_from(magnitude)
+                .ok()
+                .ok_or_else(|| Error::Parse("integer out of range".into()))?
+        };
+        return Ok(Some(TokKind::Int(value)));
     }
     if rest.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty() {
         return s
@@ -461,7 +472,9 @@ impl Parser {
                     "f" => ExprKind::Lit(Literal::Bool(false)),
                     "_" => ExprKind::Lit(Literal::Null),
                     "NaN" => ExprKind::Lit(Literal::Float(f64::NAN)),
+                    "+NaN" => ExprKind::Lit(Literal::Float(f64::NAN)),
                     "Inf" => ExprKind::Lit(Literal::Float(f64::INFINITY)),
+                    "+Inf" => ExprKind::Lit(Literal::Float(f64::INFINITY)),
                     "-Inf" => ExprKind::Lit(Literal::Float(f64::NEG_INFINITY)),
                     _ => ExprKind::Symbol(s),
                 };
@@ -1650,7 +1663,7 @@ fn format_value(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult {
             }
             'f' => match v {
                 Value::Float(n) => out.push_str(&float_render(*n)),
-                Value::Int(n) => out.push_str(&(*n as f64).to_string()),
+                Value::Int(n) => out.push_str(&n.to_string()),
                 _ => return Err(Error::Format("FormatTypeError: %f expects number".into()).into()),
             },
             'j' => out.push_str(&json_render(v)?),

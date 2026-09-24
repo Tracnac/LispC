@@ -179,6 +179,55 @@ fn format_type_and_value_of_octal_literal() {
 }
 
 #[test]
+fn base_literals_parse_i64_min() {
+    check("-0x8000000000000000", "-9223372036854775808");
+    let binary = format!("-0b1{}", "0".repeat(63));
+    check(&binary, "-9223372036854775808");
+    let octal = format!("-0o1{}", "0".repeat(21));
+    check(&octal, "-9223372036854775808");
+}
+
+#[test]
+fn positive_literals_beyond_i64_max_are_rejected() {
+    for src in [
+        "9223372036854775808",
+        "+9223372036854775808",
+        "0x8000000000000000",
+        "+0x8000000000000000",
+        "0xFFFFFFFFFFFFFFFF",
+    ] {
+        assert!(
+            matches!(
+                run(src),
+                Err(Error::Parse(message)) if message.contains("integer out of range")
+            ),
+            "{src} should be rejected as out of range"
+        );
+    }
+}
+
+#[test]
+fn negative_literals_below_i64_min_are_rejected() {
+    for src in ["-9223372036854775809", "-0x8000000000000001", "-0xFFFFFFFFFFFFFFFF"] {
+        assert!(
+            matches!(
+                run(src),
+                Err(Error::Parse(message)) if message.contains("integer out of range")
+            ),
+            "{src} should be rejected as out of range"
+        );
+    }
+}
+
+#[test]
+fn base_literal_with_invalid_digits_is_rejected() {
+    assert!(matches!(
+        run("0xZZ"),
+        Err(Error::Parse(message)) if message.starts_with("invalid number")
+    ));
+}
+
+#[test]
 fn format_type_and_value_of_zero_float() {
     check(r#"($ "%t:%s" 0.0 0.0)"#, r#""float:0""#);
 }
@@ -301,8 +350,18 @@ fn format_type_and_value_of_nan() {
 }
 
 #[test]
+fn format_type_and_value_of_positive_nan() {
+    check(r#"($ "%t:%s" +NaN +NaN)"#, r#""float:NaN""#);
+}
+
+#[test]
 fn format_type_and_value_of_infinity() {
     check(r#"($ "%t:%s" Inf Inf)"#, r#""float:Inf""#);
+}
+
+#[test]
+fn format_type_and_value_of_positive_infinity() {
+    check(r#"($ "%t:%s" +Inf +Inf)"#, r#""float:Inf""#);
 }
 
 #[test]
@@ -388,6 +447,40 @@ fn format_f_renders_negative_operand_multiplication() {
 #[test]
 fn format_f_renders_negative_operand_division() {
     check(r#"($ "%f" (div -7.0 2.0))"#, r#""-3.5""#);
+}
+
+#[test]
+fn format_f_renders_large_integer_without_precision_loss() {
+    check(r#"($ "%f" 9223372036854775807)"#, r#""9223372036854775807""#);
+}
+
+#[test]
+fn format_f_renders_integer_above_f64_mantissa_exactly() {
+    // 2^53 + 1 is not representable in f64; it must not round to 9007199254740992.
+    check(r#"($ "%f" 9007199254740993)"#, r#""9007199254740993""#);
+}
+
+#[test]
+fn format_f_renders_negative_large_integer_exactly() {
+    check(r#"($ "%f" -9007199254740993)"#, r#""-9007199254740993""#);
+}
+
+#[test]
+fn format_f_renders_min_integer_exactly() {
+    check(r#"($ "%f" -9223372036854775808)"#, r#""-9223372036854775808""#);
+    check(r#"($ "%f" -0x8000000000000000)"#, r#""-9223372036854775808""#);
+}
+
+#[test]
+fn format_f_renders_small_integer_like_decimal() {
+    check(r#"($ "%f" 42)"#, r#""42""#);
+    check(r#"($ "%f" -127)"#, r#""-127""#);
+}
+
+#[test]
+fn format_f_renders_promoted_integer_arithmetic_as_float() {
+    check(r#"($ "%f" (add 1 2.5))"#, r#""3.5""#);
+    check(r#"($ "%f" (div 7 2.0))"#, r#""3.5""#);
 }
 
 #[test]
