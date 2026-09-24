@@ -32,6 +32,14 @@ standard input until EOF:
 printf '(add 20 22)\n' | cargo run --quiet
 ```
 
+Scripts may start with a `#!` shebang line, so they can be executed directly after
+`chmod +x`:
+
+```sh
+#!/usr/bin/env small-lisp
+(expect (add 20 22) 42)
+```
+
 ## Language overview
 
 Small Lisp includes:

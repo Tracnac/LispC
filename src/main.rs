@@ -2124,6 +2124,15 @@ fn diagnostic(error: &Error, source: &str, file: &str, span: Option<Span>) -> St
     }
     out
 }
+/// A shebang line (`#!...`) is an interpreter directive for the kernel, not
+/// part of the program. When a script starts with one, only the first line is
+/// skipped — anything else keeps the source unchanged.
+fn strip_shebang(source: &str) -> &str {
+    match source.strip_prefix("#!") {
+        Some(rest) => rest.find('\n').map_or("", |offset| &rest[offset + 1..]),
+        None => source,
+    }
+}
 fn main() {
     if let Err(error) = install_sigint_handler() {
         let _ = writeln!(io::stderr(), "{error}");
@@ -2140,6 +2149,7 @@ fn main() {
             .map(|_| s)
             .map_err(|e| Error::Io(e.to_string()))
     };
+    let src = src.map(|source| strip_shebang(&source).to_owned());
     let result = (|| -> Result<(), (Error, bool)> {
         let source = src.clone().map_err(|e| (e, false))?;
         let ts = lex(&source).map_err(|e| (e, true))?;

@@ -2,6 +2,27 @@ use super::{check, run};
 use crate::*;
 
 #[test]
+fn shebang_line_is_stripped_before_lexing() {
+    assert_eq!(
+        strip_shebang("#!/usr/bin/env small-lisp\n(add 1 2)"),
+        "(add 1 2)"
+    );
+    // A shebang-only script is an empty program.
+    assert_eq!(strip_shebang("#!/usr/bin/env small-lisp"), "");
+    assert_eq!(strip_shebang(""), "");
+    // No shebang: source unchanged.
+    assert_eq!(strip_shebang("(add 1 2)"), "(add 1 2)");
+    // A `#!` that is not at byte 0 is not a shebang.
+    assert_eq!(strip_shebang(" #!/bin/sh\n(add 1 2)"), " #!/bin/sh\n(add 1 2)");
+}
+
+#[test]
+fn script_with_shebang_still_runs() {
+    let source = strip_shebang("#!/usr/bin/env small-lisp\n(expect (add 20 22) 42)");
+    check(source, "t");
+}
+
+#[test]
 fn closure_recursion_and_integer_division_work() {
     check(
         "(let fact (fn (n) (if (eq n 0) 1 (mul n (fact (sub n 1)))))) (add (fact 5) (div 7 2))",
