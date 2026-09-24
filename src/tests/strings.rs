@@ -37,28 +37,34 @@ fn string_index_errors_match_collection_rules() {
 #[test]
 fn regex_returns_and_binds_captures() {
     let value = run(r#"(let string "Hello the world")
-               (~ "^Hello(.*)$" string match)
-               (expect match ["Hello the world" " the world"])"#)
+               (~ "^Hello(.*)$" string caps)
+               (expect caps ["Hello the world" " the world"])"#)
     .unwrap();
     assert!(matches!(value, Value::Bool(true)));
 }
 
 #[test]
 fn regex_preserves_multiple_and_optional_captures() {
-    let value = run(r#"(let match _)
-               (~ "^(a)(b)?(c)$" "ac" match)
-               (expect match ["ac" "a" _ "c"])"#)
+    let value = run(r#"(let caps _)
+               (~ "^(a)(b)?(c)$" "ac" caps)
+               (expect caps ["ac" "a" _ "c"])"#)
     .unwrap();
     assert!(matches!(value, Value::Bool(true)));
 }
 
 #[test]
 fn regex_failure_does_not_overwrite_binding() {
-    let value = run(r#"(let match ["unchanged"])
-               (expect (~ "^a+$" "bbb" match) f)
-               (expect match ["unchanged"])"#)
+    let value = run(r#"(let caps ["unchanged"])
+               (expect (~ "^a+$" "bbb" caps) f)
+               (expect caps ["unchanged"])"#)
     .unwrap();
     assert!(matches!(value, Value::Bool(true)));
+
+    // A reserved name is rejected as the regex binding target.
+    assert!(matches!(
+        run(r#"(~ "^a$" "a" match)"#),
+        Err(Error::Type(message)) if message.contains("reserved name cannot be used as a binding")
+    ));
 }
 
 #[test]
@@ -79,12 +85,12 @@ fn regex_reports_invalid_patterns_and_requires_strings() {
 
 #[test]
 fn regex_binding_follows_nested_scope_rules() {
-    let value = run(r#"(let match ["outer"])
+    let value = run(r#"(let caps ["outer"])
                (let result
-                 ((~ "^(a)$" "a" match)
-                  match))
+                 ((~ "^(a)$" "a" caps)
+                  caps))
                (expect result ["a" "a"])
-               (expect match ["a" "a"])"#)
+               (expect caps ["a" "a"])"#)
     .unwrap();
     assert!(matches!(value, Value::Bool(true)));
 }

@@ -1041,6 +1041,19 @@ fn need(args: &[Expr], n: usize, name: &str) -> Result<(), Flow> {
         Err(Error::Arity(format!("{name} expects {n} arguments, got {}", args.len())).into())
     }
 }
+/// Names that the call dispatcher recognizes in head position. Binding any of
+/// these with `let` or as a function parameter is rejected, so a single name
+/// can never refer to both a value and a form.
+const RESERVED_NAMES: &[&str] = &[
+    "let", "set", "if", "fn", "loop", "break", "continue", "match", "and", "or", "not",
+    "expect", "use", "@", "$", "~", "add", "sub", "mul", "div", "mod", "pow", "eq", "ne",
+    "lt", "gt", "le", "ge", "bit-and", "bit-or", "bit-xor", "bit-not", "bit-shl", "bit-shr",
+];
+
+fn is_reserved_name(name: &str) -> bool {
+    RESERVED_NAMES.contains(&name)
+}
+
 fn define_let(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<(String, Value), Flow> {
     need(args, 2, "let")?;
     let name = if let ExprKind::Symbol(name) = &args[0].kind {
@@ -1048,6 +1061,11 @@ fn define_let(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<(String
     } else {
         return Err(Error::Type("let name must be an identifier".into()).into());
     };
+    if is_reserved_name(&name) {
+        return Err(
+            Error::Type(format!("reserved name cannot be bound: `{name}`")).into(),
+        );
+    }
     if env.borrow().values.iter().any(|(k, _)| k == &name) {
         return Err(Error::DuplicateBinding(name).into());
     }
@@ -1125,6 +1143,12 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                     }
                     _ => return Err(Error::Type("fn parameters must use ()".into()).into()),
                 };
+                if let Some(p) = ps.iter().find(|p| is_reserved_name(p)) {
+                    return Err(Error::Type(format!(
+                        "reserved name cannot be used as a parameter: `{p}`"
+                    ))
+                    .into());
+                }
                 let fun = Value::Function(Rc::new(Function {
                     params: ps,
                     body: args[1].clone(),
@@ -1283,6 +1307,12 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                         })
                         .collect(),
                 )));
+                if is_reserved_name(name) {
+                    return Err(Error::Type(format!(
+                        "reserved name cannot be used as a binding: `{name}`"
+                    ))
+                    .into());
+                }
                 bind_value(name, result.clone(), env).map_err(Flow::Error)?;
                 return Ok(result);
             }

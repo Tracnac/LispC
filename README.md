@@ -106,12 +106,12 @@ is represented by `_`. On failure it returns `f` and leaves an existing binding 
 
 ```lisp
 (let string "Hello the world")
-(~ "^Hello(.*)$" string match)
+(~ "^Hello(.*)$" string caps)
 ; ["Hello the world" " the world"]
 
-(let match ["unchanged"])
-(~ "^Goodbye" string match)
-; f; match is still ["unchanged"]
+(let caps ["unchanged"])
+(~ "^Goodbye" string caps)
+; f; caps is still ["unchanged"]
 ```
 
 ## File IO

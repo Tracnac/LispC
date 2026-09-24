@@ -299,10 +299,9 @@ fn loop_break_after_false_if_returns_next_value() {
 }
 
 #[test]
-fn match_is_bindable_as_identifier() {
-    check(
-        r#"(let match "old")
-match"#,
-        r#""old""#,
-    );
+fn match_is_not_bindable_as_identifier() {
+    assert!(matches!(
+        run(r#"(let match "old")"#),
+        Err(Error::Type(message)) if message.contains("reserved name cannot be bound")
+    ));
 }

@@ -40,6 +40,11 @@ Les symboles `t`, `f`, `_`, `NaN`, `+NaN`, `Inf`, `+Inf` et `-Inf` sont des litt
   `io.open`, `io.read`, `io.write` et `io.close` après `(use "io")`.
   `@` effectue des requêtes HTTP synchrones décrites en §13.1, `$` effectue l'interpolation
   décrite en §14 et `~` la correspondance décrite en §15.
+* Les noms de formes spéciales, de builtins stricts et d'interaction ci-dessus sont réservés :
+  ni un `let` ni un paramètre de fonction ne peut les utiliser comme identifiant (erreur), de
+  sorte qu'un nom ne désigne jamais à la fois une valeur et une forme. Les littéraux réservés
+  (`t`, `f`, `_`, `NaN`, `Inf`, `+Inf`, `-Inf`, `+NaN`, `-NaN`) restent interdits en position
+  d'identifiant comme avant.
 * Ces noms sont reconnus par leur orthographe exacte lorsqu'ils sont en tête d'un appel.
   Une liaison portant le même nom ne remplace donc pas ce builtin dans cette position. Les
   noms peuvent toutefois être utilisés comme noms de liaison dans les autres contextes,
@@ -250,7 +255,8 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 15. Regex ~
 * Syntaxe : `(~ regex string binding)` → retourne `f` si aucune correspondance ; sinon retourne
   un array contenant la correspondance complète suivie des groupes capturants, et lie cet array
-  à `binding`. `regex` et `string` doivent être des strings ; `binding` doit être un identifiant.
+  à `binding`. `regex` et `string` doivent être des strings ; `binding` doit être un identifiant
+  non réservé (§2.1).
 * Les regex utilisent le moteur Rust `regex` et opèrent sur des strings UTF-8. Les groupes
   capturants sont conservés dans leur ordre ; un groupe optionnel non correspondant devient `_`.
 * En cas de succès, une liaison existante (dans le scope courant ou parent) est mise à jour comme

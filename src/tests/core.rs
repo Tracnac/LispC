@@ -138,6 +138,31 @@ fn let_shadows_bindings_from_outer_scopes() {
 }
 
 #[test]
+fn binding_form_and_builtin_names_is_rejected() {
+    for src in ["(let let 1)", "(let set 1)", "(let if 1)", "(let fn 1)", "(let expect 1)", "(let add 1)", "(let $ 1)", "(let @ 1)"] {
+        assert!(
+            matches!(run(src), Err(Error::Type(message)) if message.contains("reserved name cannot be bound")),
+            "expected reserved-name error for {src}"
+        );
+    }
+    // The `use` special form can carry a `(let name value)` shape; it goes
+    // through the same check.
+    assert!(matches!(
+        run("(use (let set 1))"),
+        Err(Error::Type(message)) if message.contains("reserved name cannot be bound")
+    ));
+    // Function parameters are protected too.
+    assert!(matches!(
+        run("(let bad (fn (let) 1))"),
+        Err(Error::Type(message)) if message.contains("reserved name cannot be used as a parameter")
+    ));
+    assert!(matches!(
+        run("(let bad (fn (x add) 1))"),
+        Err(Error::Type(message)) if message.contains("reserved name cannot be used as a parameter")
+    ));
+}
+
+#[test]
 fn repeated_let_in_loop_scope_is_a_duplicate_error() {
     assert!(matches!(
         run("(loop\n  (let line 0)\n  (set line (add line 1))\n  (if (gt line 1) (break line)))"),
