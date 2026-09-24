@@ -162,6 +162,10 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 * Fonctions : égalité par identité (même closure physique), deux fn au code identique mais définis séparément → f.
 * Floats : comparaison IEEE 754, sans epsilon : NaN n'est égal à aucune valeur (y compris NaN), les zéros signés sont égaux (`0.0 == -0.0`), et les infinis sont égaux à eux-mêmes.
 * Références : déréférencées avant comparaison (§7).
+* Variadique : `eq` est vrai seulement si tous les arguments sont égaux deux à deux
+  (comparaison par paires, pas seulement adjacentes) ; `ne` est la négation exacte de `eq`,
+  vrai dès qu'au moins une paire diffère. `(eq)` et `(eq x)` → t ; `(ne)` et `(ne x)` → f.
+  Pour deux arguments, `ne` équivaut à `not eq`.
 
 11. if / match
 * if sans else, prédicat faux → retourne _.

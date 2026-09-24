@@ -1850,11 +1850,13 @@ fn builtin(name: &str, vs: Vec<Value>) -> Result<Value, Error> {
             require_exact(name, vs.len(), 2)?;
             binary_numeric(name, vs[0].clone(), vs[1].clone())
         }
+        // eq is true when every pair of operands is equal; ne is its exact
+        // complement, true as soon as any pair differs. With fewer than two
+        // operands eq is vacuously true and ne therefore false.
         "eq" | "ne" => {
-            let equal = vs.windows(2).all(|pair| equals(&pair[0], &pair[1]));
-            let distinct = (0..vs.len())
-                .all(|index| ((index + 1)..vs.len()).all(|other| !equals(&vs[index], &vs[other])));
-            Ok(Value::Bool(if name == "eq" { equal } else { distinct }))
+            let all_equal = (0..vs.len())
+                .all(|index| ((index + 1)..vs.len()).all(|other| equals(&vs[index], &vs[other])));
+            Ok(Value::Bool(if name == "eq" { all_equal } else { !all_equal }))
         }
         "lt" | "gt" | "le" | "ge" => {
             let ordered = vs.windows(2).try_fold(true, |_, pair| {

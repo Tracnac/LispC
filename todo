@@ -16,8 +16,6 @@ Bug
 
 - HTTP failures are reported as IOError (layering). (from 10)
 
-- ne is pairwise-distinct while eq is only adjacent-chained (asymmetry that surprises). (from 10)
-
 Feature
 =======
 

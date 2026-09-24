@@ -399,13 +399,13 @@ fn eq_two_element_arrays_differ_by_order() {
 }
 
 #[test]
-fn ne_with_no_operands_is_true() {
-    check(r#"(ne)"#, r#"t"#);
+fn ne_with_no_operands_is_false() {
+    check(r#"(ne)"#, r#"f"#);
 }
 
 #[test]
-fn ne_with_single_operand_is_true() {
-    check(r#"(ne 1)"#, r#"t"#);
+fn ne_with_single_operand_is_false() {
+    check(r#"(ne 1)"#, r#"f"#);
 }
 
 #[test]
@@ -419,8 +419,25 @@ fn ne_all_different_operands_are_not_equal() {
 }
 
 #[test]
-fn ne_is_false_when_an_operand_repeats() {
-    check(r#"(ne 1 2 1)"#, r#"f"#);
+fn ne_is_true_when_any_pair_differs() {
+    check(r#"(ne 1 2 1)"#, r#"t"#);
+}
+
+#[test]
+fn eq_is_pairwise_not_just_adjacent() {
+    // 9007199254740993 (int) is equal to 9007199254740992.0 (float) once
+    // rounded to f64, and that float equals 9007199254740992 (int); but the
+    // two ints differ. eq must therefore be false for all three.
+    check(r#"(eq 9007199254740993 9007199254740992.0 9007199254740992)"#, r#"f"#);
+    check(r#"(ne 9007199254740993 9007199254740992.0 9007199254740992)"#, r#"t"#);
+}
+
+#[test]
+fn eq_and_ne_are_exact_complements() {
+    check(
+        "(expect (eq 1 1) t) (expect (ne 1 1) f) (expect (eq 1 2) f) (expect (ne 1 2) t) (expect (eq 1 1 1) t) (expect (ne 1 1 1) f) (expect (eq 1 1 2) f) (expect (ne 1 1 2) t) (expect (eq 1 2 3) f) (expect (ne 1 2 3) t)",
+        "t",
+    );
 }
 
 #[test]

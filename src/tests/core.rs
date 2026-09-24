@@ -33,7 +33,7 @@ fn closure_recursion_and_integer_division_work() {
 #[test]
 fn variadic_builtins_follow_their_declared_arities() {
     check(
-        "(expect (add) 0) (expect (add 1 2 3 4) 10) (expect (mul) 1) (expect (mul 2 3 4) 24) (expect (sub 10) -10) (expect (sub 10 3 2) 5) (expect (div 20) 0.05) (expect (div 20 2 2) 5) (expect (eq) t) (expect (eq 1) t) (expect (ne) t) (expect (ne 1) t) (expect (ne 1 2 1) f) (expect (ne 1 2 3) t) (expect (lt 1 2 3) t) (expect (ge 3 2 2) t) (expect (bit-and) -1) (expect (bit-and 15 7 3) 3) (expect (bit-or) 0) (expect (bit-or 1 2 4) 7) (expect (bit-xor 7 3 1) 5)",
+        "(expect (add) 0) (expect (add 1 2 3 4) 10) (expect (mul) 1) (expect (mul 2 3 4) 24) (expect (sub 10) -10) (expect (sub 10 3 2) 5) (expect (div 20) 0.05) (expect (div 20 2 2) 5) (expect (eq) t) (expect (eq 1) t) (expect (ne) f) (expect (ne 1) f) (expect (ne 1 2 1) t) (expect (ne 1 2 3) t) (expect (lt 1 2 3) t) (expect (ge 3 2 2) t) (expect (bit-and) -1) (expect (bit-and 15 7 3) 3) (expect (bit-or) 0) (expect (bit-or 1 2 4) 7) (expect (bit-xor 7 3 1) 5)",
         "t",
     );
 }
