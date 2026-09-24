@@ -139,7 +139,7 @@ fn let_shadows_bindings_from_outer_scopes() {
 
 #[test]
 fn binding_form_and_builtin_names_is_rejected() {
-    for src in ["(let let 1)", "(let set 1)", "(let if 1)", "(let fn 1)", "(let expect 1)", "(let add 1)", "(let $ 1)", "(let @ 1)"] {
+    for src in ["(let let 1)", "(let set 1)", "(let if 1)", "(let fn 1)", "(let expect 1)", "(let add 1)", "(let $ 1)", "(let @ 1)", "(let eval 1)"] {
         assert!(
             matches!(run(src), Err(Error::Type(message)) if message.contains("reserved name cannot be bound")),
             "expected reserved-name error for {src}"
@@ -649,4 +649,68 @@ fn nested_blocks_middle_binding_shadows_outer() {
 #[test]
 fn nested_blocks_inner_binding_wins() {
     check("(let x 1) ((let x 2) ((let x 3) x))", "3");
+}
+
+#[test]
+fn eval_returns_the_last_forms_value() {
+    check(r#"(eval "(add 1 2)")"#, "3");
+    check(r#"(eval "(let a 1)(add a 2)")"#, "3");
+    check(r#"(eval "")"#, "_");
+}
+
+#[test]
+fn eval_accepts_variable_names_and_source_in_variables() {
+    check(r#"(let x 42) (eval "x")"#, "42");
+    check(r#"(let code "(mul 2 3)") (eval code)"#, "6");
+}
+
+#[test]
+fn eval_runs_in_the_callers_environment() {
+    check(r#"(let y 5) (eval "(add y 1)")"#, "6");
+    check(r#"(let z 1) (eval "(set z 9)") z"#, "9");
+    check(r#"(eval "(let fresh 7)") fresh"#, "7");
+}
+
+#[test]
+fn eval_propagates_control_flow_to_the_callers_loop() {
+    check(r#"(loop (eval "(break 42)"))"#, "42");
+    check(r#"(let i 0) (loop (eval "(break)") (set i 1)) i"#, "0");
+}
+
+#[test]
+fn eval_propagates_errors_from_the_evald_code() {
+    assert!(matches!(run(r#"(eval "(div 1 0)")"#), Err(Error::Math(_))));
+    assert!(matches!(
+        run(r#"(eval "missing")"#),
+        Err(Error::Name(name)) if name == "missing"
+    ));
+    assert!(matches!(run(r#"(eval "(add")"#), Err(Error::Parse(_))));
+    assert!(matches!(
+        run(r#"(eval "(let let 1)")"#),
+        Err(Error::Type(message)) if message.contains("reserved name cannot be bound")
+    ));
+}
+
+#[test]
+fn eval_rejects_non_string_arguments_and_bad_arity() {
+    for src in ["(eval 5)", "(eval [1 2])", "(eval t)", "(eval (fn (x) x))"] {
+        assert!(
+            matches!(run(src), Err(Error::Type(message)) if message == "expected string"),
+            "expected type error for {src}"
+        );
+    }
+    assert!(matches!(run("(eval)"), Err(Error::Arity(_))));
+    assert!(matches!(run(r#"(eval "1" "2")"#), Err(Error::Arity(_))));
+}
+
+#[test]
+fn eval_failure_keeps_the_diagnostic_pointing_at_the_call() {
+    let source = r#"(let a 1) (eval "(div 1 0)") (add a 1)"#;
+    assert!(run(source).is_err());
+    let span = LAST_ERROR_SPAN.with(|span| *span.borrow()).expect("span recorded");
+    assert!(span.start <= source.len() && span.end <= source.len());
+    assert!(
+        source[..span.end].contains("eval"),
+        "span should cover the eval call, got {span:?}"
+    );
 }

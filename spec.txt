@@ -30,8 +30,9 @@ Les symboles `t`, `f`, `_`, `NaN`, `+NaN`, `Inf`, `+Inf` et `-Inf` sont des litt
 * Le lexer ne produit pas de token spécial pour les mots-clés : ils sont lexés comme des
   symboles puis reconnus lorsqu'ils apparaissent en tête d'un appel.
 * Les formes spéciales sont : `let`, `set`, `if`, `fn`, `loop`, `break`, `continue`, `match`,
-  `and`, `or`, `not`, `expect` et `use`. Elles contrôlent l'évaluation de leurs arguments ; leurs
-  arguments ne sont donc pas nécessairement tous évalués avant l'appel.
+  `and`, `or`, `not`, `expect`, `use` et `eval`. Elles contrôlent l'évaluation de leurs arguments ;
+  leurs arguments ne sont donc pas nécessairement tous évalués avant l'appel. `eval` est décrit
+  en §16.
 * Les builtins stricts sont : `add`, `sub`, `mul`, `div`, `mod`, `pow`, `eq`, `ne`, `lt`, `gt`,
   `le`, `ge`, `bit-and`, `bit-or`, `bit-xor`, `bit-not`, `bit-shl` et `bit-shr`. Leurs
   arguments sont évalués puis l'opération est appliquée selon les règles d'arité de §6 et de
@@ -274,7 +275,20 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 * En cas d'échec, le résultat est `f` et la liaison existante n'est pas modifiée.
 * Une regex invalide produit InvalidRegex avec le diagnostic du moteur, sans modifier la liaison.
 
-16. Erreurs
+16. Eval
+* Syntaxe : `(eval source)` → évalue `source` comme du code Lisp et retourne la valeur de la
+  dernière forme. `source` doit être une string ; sinon TypeError.
+* La string est lexée et parsée comme un programme (§3), puis chaque forme est évaluée dans
+  l'environnement courant de l'appelant : les liaisons visibles sont accessibles, et `let`, `set`
+  et `use` restent valides dans le code évalué. Une string vide retourne `_`.
+* Le code évalué hérite de la profondeur de boucle/match de l'appelant : `break` et `continue`
+  s'y propagent vers la boucle englobante, comme pour du code au même niveau.
+* `(eval "x")` évalue l'expression `x` (typiquement une variable) ; `(eval "(add 1 2)")` évalue
+  du code en ligne ; une variable contenant du code source s'utilise de la même façon.
+* Les erreurs de parsing et d'exécution internes sont propagées normalement ; leur diagnostic
+  pointe sur l'appel `(eval ...)` du programme hôte.
+
+17. Erreurs
 Catégories : ParseError, NameError, TypeError, ArityError, MathError (div/0, overflow), IOError,
 FormatError, InvalidRegex, DuplicateKeyError, DuplicateBindingError, MatchError, ContinueOutsideLoop,
 BreakOutsideLoop et Interrupted.
@@ -285,7 +299,7 @@ et un curseur `^`. Les erreurs qui traversent des fonctions utilisateur affichen
 d'appel avec le nom de chaque fonction, ou `<anonymous function>`.
 Sur Unix, Ctrl-C est converti en `Interrupted` et pointe vers l'expression en cours d'évaluation.
 
-17. Structs, détails
+18. Structs, détails
 * Ordre d'insertion préservé.
 * Clés dupliquées à la construction → DuplicateKeyError (pas de "dernier gagne" silencieux).
 * Clés identifiants uniquement, sans guillemets.
@@ -293,5 +307,5 @@ Sur Unix, Ctrl-C est converti en `Interrupted` et pointe vers l'expression en co
   déballé vers la valeur de ce champ puis appelé. Les autres évaluations, notamment l'accès
   de champ et l'interpolation, conservent le struct complet.
 
-18. Implémentation
+19. Implémentation
 Interpréteur tree-walking en Rust (parse → AST → eval récursif).

@@ -1046,8 +1046,9 @@ fn need(args: &[Expr], n: usize, name: &str) -> Result<(), Flow> {
 /// can never refer to both a value and a form.
 const RESERVED_NAMES: &[&str] = &[
     "let", "set", "if", "fn", "loop", "break", "continue", "match", "and", "or", "not",
-    "expect", "use", "@", "$", "~", "add", "sub", "mul", "div", "mod", "pow", "eq", "ne",
-    "lt", "gt", "le", "ge", "bit-and", "bit-or", "bit-xor", "bit-not", "bit-shl", "bit-shr",
+    "expect", "use", "eval", "@", "$", "~", "add", "sub", "mul", "div", "mod", "pow", "eq",
+    "ne", "lt", "gt", "le", "ge", "bit-and", "bit-or", "bit-xor", "bit-not", "bit-shl",
+    "bit-shr",
 ];
 
 fn is_reserved_name(name: &str) -> bool {
@@ -1314,6 +1315,33 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                     .into());
                 }
                 bind_value(name, result.clone(), env).map_err(Flow::Error)?;
+                return Ok(result);
+            }
+            "eval" => {
+                need(args, 1, "eval")?;
+                let source = as_str(eval(&args[0], env, l, m)?)?;
+                let program = (|| -> Result<Vec<Expr>, Error> {
+                    let ts = lex(&source)?;
+                    Parser { ts, i: 0 }.program()
+                })()
+                .map_err(|error| {
+                    // The string's spans index the eval'd text, not the file
+                    // being run; point the diagnostic at the eval call instead.
+                    PARSE_ERROR_SPAN.with(|span| *span.borrow_mut() = None);
+                    LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
+                    error
+                })?;
+                let mut result = Value::Null;
+                for form in program {
+                    result = match eval(&form, env, l, m) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            LAST_ERROR_SPAN
+                                .with(|span| *span.borrow_mut() = Some(call_span));
+                            return Err(error);
+                        }
+                    };
+                }
                 return Ok(result);
             }
             _ => {

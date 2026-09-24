@@ -50,6 +50,7 @@ Small Lisp includes:
 - fixed-arity user functions and variadic numeric folds
 - conditional expressions, pattern matching, loops, `break`, and `continue`
 - value formatting with `$`, equality and comparison operators, and `expect` assertions
+- runtime evaluation of source strings with `eval`
 - UTF-8 strings indexed by Unicode grapheme clusters
 - regular-expression matching with capture arrays
 - synchronous HTTP requests and file-descriptor IO
@@ -112,6 +113,20 @@ is represented by `_`. On failure it returns `f` and leaves an existing binding 
 (let caps ["unchanged"])
 (~ "^Goodbye" string caps)
 ; f; caps is still ["unchanged"]
+```
+
+### Runtime eval
+
+`eval` parses a string as a program and runs it in the caller's environment, returning the last
+form's value — so it can name variables, execute inline code, or run source stored in a variable.
+Control flow (`break`/`continue`) propagates out of the evaluated code.
+
+```lisp
+(let x 42)
+(eval "x")            ; 42, look up a variable
+(eval "(add x 1)")    ; 43, inline code sees the caller's bindings
+(let code "(mul 2 3)")
+(eval code)           ; 6
 ```
 
 ## File IO
