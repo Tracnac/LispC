@@ -144,7 +144,7 @@ normal Lisp errors.
 
 ## Formatting and assertions
 
-`$` supports `%s` (rendered value), `%d` (decimal integer), `%b` (binary integer), `%8b`, `%16b`, `%32b`, and `%64b` (fixed-width binary integers), `%h` (lowercase hexadecimal integer), `%o` (octal integer), `%f` (number), `%j` (JSON), `%t` (value type), `%v` (structural debug output), and `%%` (a literal percent sign). Fixed-width binary forms render the low bits of the integer, including two's-complement representations for negative integers.
+`$` supports `%s` (rendered value), `%q` (string as a parseable Lisp literal), `%x` (any value as parseable Lisp source), `%d` (decimal integer), `%b` (binary integer), `%8b`, `%16b`, `%32b`, and `%64b` (fixed-width binary integers), `%h` (lowercase hexadecimal integer), `%o` (octal integer), `%f` (number), `%j` (JSON), `%t` (value type), `%v` (structural debug output), and `%%` (a literal percent sign). Fixed-width binary forms render the low bits of the integer, including two's-complement representations for negative integers.
 
 `expect` checks that its first expression equals its second expression and returns `t`. An optional final string describes the assertion when it fails.
 

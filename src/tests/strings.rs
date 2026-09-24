@@ -140,6 +140,193 @@ fn formatting_supports_integer_bases_json_and_debug_output() {
 }
 
 #[test]
+fn formatting_percent_q_quotes_strings_as_lisp_literals() {
+    // %s inserts the raw contents; %q wraps them in a parseable Lisp literal.
+    let value = run(r#"($ "%s|%q" "hello" "hello")"#).unwrap();
+    assert!(matches!(value, Value::Str(text) if text == r#"hello|"hello""#));
+
+    let cases: &[(&str, &str)] = &[
+        (r#""hello""#, r#""hello""#),
+        (r#""hello world""#, r#""hello world""#),
+        (r#""hello \"world\"""#, r#""hello \"world\"""#),
+        (r#""C:\\temp\\foo""#, r#""C:\\temp\\foo""#),
+        (r#""line1\nline2""#, r#""line1\nline2""#),
+        (r#""""#, r#""""#),
+    ];
+    for &(literal, expected) in cases {
+        let value = run(&format!("($ \"%q\" {literal})")).unwrap();
+        assert!(
+            matches!(&value, Value::Str(text) if text == expected),
+            "{literal} -> {}, expected {}", render(&value), expected
+        );
+    }
+}
+
+#[test]
+fn formatting_percent_q_round_trips_through_the_reader() {
+    let literals = [
+        r#""hello""#,
+        r#""hello world""#,
+        r#""hello \"world\"""#,
+        r#""C:\\temp\\foo""#,
+        r#""line1\nline2""#,
+        r#""""#,
+    ];
+    for literal in literals {
+        let Value::Str(content) = run(&format!("($ \"%s\" {literal})")).unwrap() else {
+            panic!("%s of {literal} was not a string");
+        };
+        let Value::Str(quoted) = run(&format!("($ \"%q\" {literal})")).unwrap() else {
+            panic!("%q of {literal} was not a string");
+        };
+        assert!(
+            quoted.starts_with('"') && quoted.ends_with('"'),
+            "%q of {literal} is not a literal: {quoted:?}"
+        );
+        // The quoted output is itself a Lisp program: a single string literal.
+        let reparsed = run(&quoted)
+            .unwrap_or_else(|e| panic!("{quoted:?} (from {literal}) does not reparse: {e:?}"));
+        assert!(
+            matches!(reparsed, Value::Str(round) if round == content),
+            "{literal} did not round-trip through %q"
+        );
+    }
+}
+
+#[test]
+fn formatting_percent_q_follows_references() {
+    let value = run(r#"(let s "hello") ($ "%q" ^s)"#).unwrap();
+    assert!(matches!(value, Value::Str(text) if text == r#""hello""#));
+}
+
+#[test]
+fn formatting_percent_x_serializes_values_as_lisp_source() {
+    let cases: &[(&str, &str)] = &[
+        (r#"($ "%x" "hello")"#, r#""hello""#),
+        (r#"($ "%x" "hello \"world\"")"#, r#""hello \"world\"""#),
+        ("($ \"%x\" 42)", "42"),
+        ("($ \"%x\" 3.14)", "3.14"),
+        ("($ \"%x\" t)", "t"),
+        ("($ \"%x\" f)", "f"),
+        ("($ \"%x\" _)", "_"),
+        ("($ \"%x\" [1 2 3])", "[1 2 3]"),
+        (r#"($ "%x" [1 "hello" t _ 42])"#, r#"[1 "hello" t _ 42]"#),
+        (r#"($ "%x" {name:"Yvan" age:56})"#, r#"{name:"Yvan" age:56}"#),
+        (
+            r#"($ "%x" {name:"Yvan" contact:{gsm:"0102030405"} scores:[10 20 30]})"#,
+            r#"{name:"Yvan" contact:{gsm:"0102030405"} scores:[10 20 30]}"#,
+        ),
+        (r#"($ "%x" [1 "hello" [2 3]])"#, r#"[1 "hello" [2 3]]"#),
+        (r#"($ "%x" {a:[1 {b:[2 [3]]}] c:"e"})"#, r#"{a:[1 {b:[2 [3]]}] c:"e"}"#),
+        // Floats must serialize as reader-readiable plain decimals.
+        ("($ \"%x\" 2.0)", "2.0"),
+        ("($ \"%x\" (pow 10.0 21))", "1000000000000000000000.0"),
+        ("($ \"%x\" Inf)", "Inf"),
+        ("($ \"%x\" (mul Inf 0.0))", "NaN"),
+        ("($ \"%x\" -0.0)", "-0.0"),
+    ];
+    for &(source, expected) in cases {
+        let value = run(source).unwrap();
+        assert!(
+            matches!(&value, Value::Str(text) if text == expected),
+            "{source} -> {}, expected {}", render(&value), expected
+        );
+    }
+}
+
+#[test]
+fn formatting_percent_x_round_trips_through_the_reader() {
+    let literals = [
+        r#""hello""#,
+        r#""hello \"world\"""#,
+        "42",
+        "3.14",
+        "t",
+        "f",
+        "_",
+        "[1 2 3]",
+        r#"[1 "hello" [2 3]]"#,
+        r#"{name:"Yvan" age:56}"#,
+        r#"{name:"Yvan" contact:{gsm:"0102030405"}}"#,
+        r#"[1 "hello" {inner:[t f _ {deep:"x"}]} [2 [3 4]]]"#,
+        r#"{a:[1 {b:[2 [3]]}] c:{d:"e"}}"#,
+    ];
+    for literal in literals {
+        let original = run(literal).unwrap_or_else(|e| panic!("{literal} does not parse: {e:?}"));
+        let Value::Str(serialized) = run(&format!("($ \"%x\" {literal})")).unwrap() else {
+            panic!("%x of {literal} was not a string");
+        };
+        let reparsed = run(&serialized)
+            .unwrap_or_else(|e| panic!("{serialized:?} (from {literal}) does not reparse: {e:?}"));
+        assert!(
+            equals(&reparsed, &original),
+            "{literal} -> {serialized} did not round-trip"
+        );
+    }
+    // Computed values whose Rust rendering uses scientific notation or lacks
+    // a decimal point must still round-trip through %x.
+    for source in [
+        "(pow 10.0 21)",
+        "(pow 10.0 -7)",
+        "2.0",
+        "(div 1.0 2.0)",
+        "(mul 3.0 1.5)",
+        "Inf",
+        "-Inf",
+    ] {
+        let original = run(source).unwrap();
+        let Value::Str(serialized) = run(&format!("($ \"%x\" {source})")).unwrap() else {
+            panic!("%x of {source} was not a string");
+        };
+        let reparsed = run(&serialized)
+            .unwrap_or_else(|e| panic!("{serialized:?} (from {source}) does not reparse: {e:?}"));
+        assert!(
+            equals(&reparsed, &original),
+            "{source} -> {serialized} did not round-trip"
+        );
+    }
+}
+
+#[test]
+fn formatting_percent_x_follows_references() {
+    let value = run(r#"(let s "hi") ($ "%x" ^s)"#).unwrap();
+    assert!(matches!(value, Value::Str(text) if text == r#""hi""#));
+    let value = run(r#"(let a [1 2]) ($ "%x" ^a)"#).unwrap();
+    assert!(matches!(value, Value::Str(text) if text == "[1 2]"));
+}
+
+#[test]
+fn formatting_percent_x_rejects_functions() {
+    assert!(matches!(
+        run(r#"($ "%x" (fn () 1))"#),
+        Err(Error::Format(message)) if message.contains("%x cannot serialize function")
+    ));
+}
+
+#[test]
+fn formatting_percent_q_rejects_non_strings() {
+    for src in [
+        "($ \"%q\" 5)",
+        "($ \"%q\" t)",
+        "($ \"%q\" [1 2])",
+        "($ \"%q\" {a:1})",
+    ] {
+        assert!(
+            matches!(run(src), Err(Error::Format(message)) if message.contains("%q expects string")),
+            "expected type error for {src}"
+        );
+    }
+    assert!(matches!(
+        run("($ \"%q\")"),
+        Err(Error::Format(message)) if message == "FormatArityError"
+    ));
+    assert!(matches!(
+        run(r#"($ "%q" "a" "b")"#),
+        Err(Error::Format(message)) if message == "FormatArityError"
+    ));
+}
+
+#[test]
 fn format_type_and_value_of_null() {
     check(r#"($ "%t:%s" _ _)"#, r#""null:""#);
 }

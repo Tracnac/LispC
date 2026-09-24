@@ -220,6 +220,16 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 * `%s` accepte tout type et produit la stringification canonique. Les strings utilisées comme
   valeurs imbriquées dans les arrays et structs sont entourées de guillemets ; les clés de struct
   ne le sont pas.
+* `%q` exige une string et produit un littéral string Lisp entre guillemets, ré-utilisable par le
+  lecteur : `"` → `\"`, `\` → `\\`, saut de ligne → `\n`, retour chariot → `\r`, tabulation →
+  `\t` ; tout autre caractère est émis tel quel (le lecteur l'accepte verbatim). Le résultat
+  re-parse comme la même string (`($ "%q" "hi\n")` → `"hi\n"`). Les références sont déréférencées.
+* `%x` sérialise n'importe quelle valeur en source Lisp canonique, ré-utilisable par le lecteur :
+  les strings imbriquées utilisent les règles d'échappement ci-dessus, les booléens deviennent
+  `t`/`f`, `_` devient `_`, les floats utilisent leur représentation numérique (`NaN`, `Inf`,
+  `-Inf` inclus), les arrays sont `[a b c]`, les structs `{clé:valeur ...}` dans l'ordre
+  d'insertion. Les fonctions n'ont pas de représentation source et sont refusées. Le résultat
+  re-parse comme une valeur égale à l'originale.
 * `%d` exige un integer et produit son écriture décimale signée.
 * `%b` exige un integer et produit son écriture binaire sans largeur imposée.
 * `%8b`, `%16b`, `%32b` et `%64b` exigent un integer et produisent une écriture binaire

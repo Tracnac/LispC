@@ -1663,6 +1663,8 @@ fn format_value(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult {
         i += 1;
         match s {
             's' => out.push_str(&render(v)),
+            'q' => out.push_str(&lisp_quoted(v)?),
+            'x' => out.push_str(&lisp_source(v)?),
             'd' => {
                 if let Value::Int(n) = v {
                     out.push_str(&n.to_string())
@@ -1764,6 +1766,50 @@ fn float_render(value: f64) -> String {
         value.to_string()
     }
 }
+/// Renders a float so the Lisp reader parses it back as the same f64 (`%x`).
+/// The reader only accepts plain-decimal literals containing `.` (no exponent
+/// syntax), so scientific notation produced by `f64::to_string` is expanded
+/// and a trailing `.0` keeps integral floats floats.
+fn float_source(value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".into();
+    }
+    if value == f64::INFINITY {
+        return "Inf".into();
+    }
+    if value == f64::NEG_INFINITY {
+        return "-Inf".into();
+    }
+    let plain = value.to_string();
+    if let Some((mantissa, exponent)) = plain.split_once(['e', 'E']) {
+        let exponent: i64 = exponent.parse().expect("float exponent is numeric");
+        let (sign, mantissa) = mantissa
+            .strip_prefix('-')
+            .map_or(("", mantissa), |rest| ("-", rest));
+        let (int, frac) = mantissa
+            .split_once('.')
+            .map_or((mantissa, ""), |(int, frac)| (int, frac));
+        let point = int.len() as i64 + exponent;
+        let digits = format!("{int}{frac}");
+        let text = if point <= 0 {
+            format!("0.{}{}", "0".repeat((-point) as usize), digits)
+        } else if point as usize >= digits.len() {
+            format!(
+                "{}{}.0",
+                digits,
+                "0".repeat((point as usize) - digits.len())
+            )
+        } else {
+            let position = point as usize;
+            format!("{}.{}", &digits[..position], &digits[position..])
+        };
+        format!("{sign}{text}")
+    } else if plain.contains('.') {
+        plain
+    } else {
+        format!("{plain}.0")
+    }
+}
 fn json_render(v: &Value) -> Result<String, Error> {
     match v {
         Value::Null => Ok("null".into()),
@@ -1816,6 +1862,63 @@ fn json_string(value: &str) -> String {
     }
     escaped.push('\"');
     escaped
+}
+/// Renders a string as a Lisp double-quoted literal. Uses only the escape
+/// sequences the reader understands (`\n`, `\r`, `\t`, `\\`, `\"`), so the
+/// result parses back to the same string. Any other character is emitted raw,
+/// which the reader accepts verbatim and therefore round-trips as well.
+fn lisp_string(value: &str) -> String {
+    let mut escaped = String::from("\"");
+    for c in value.chars() {
+        match c {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            c => escaped.push(c),
+        }
+    }
+    escaped.push('\"');
+    escaped
+}
+/// `%q` requires a string (references are followed, like `%j`).
+fn lisp_quoted(v: &Value) -> Result<String, Error> {
+    match v {
+        Value::Str(text) => Ok(lisp_string(text)),
+        Value::Ref(cell) => lisp_quoted(&cell.borrow()),
+        _ => Err(Error::Format("FormatTypeError: %q expects string".into())),
+    }
+}
+/// Serializes a value as canonical Lisp source (`%x`), recursively. Nested
+/// strings use the reader's escaping rules; booleans and null use their `t`/`f`/`_`
+/// reader syntax, so the result reparses to an equal value. Struct keys are
+/// identifiers by construction and are emitted verbatim, in insertion order.
+/// Functions have no source representation and are rejected, as with `%j`.
+fn lisp_source(v: &Value) -> Result<String, Error> {
+    match v {
+        Value::Null => Ok("_".into()),
+        Value::Bool(x) => Ok(if *x { "t" } else { "f" }.into()),
+        Value::Int(x) => Ok(x.to_string()),
+        Value::Float(x) => Ok(float_source(*x)),
+        Value::Str(x) => Ok(lisp_string(x)),
+        Value::Ref(cell) => lisp_source(&cell.borrow()),
+        Value::Array(items) => items
+            .borrow()
+            .iter()
+            .map(|item| lisp_source(&item.borrow()))
+            .collect::<Result<Vec<_>, Error>>()
+            .map(|items| format!("[{}]", items.join(" "))),
+        Value::Struct(fields) => fields
+            .borrow()
+            .iter()
+            .map(|(key, value)| Ok(format!("{key}:{}", lisp_source(&value.borrow())?)))
+            .collect::<Result<Vec<_>, Error>>()
+            .map(|fields| format!("{{{}}}", fields.join(" "))),
+        Value::Function(_) | Value::NativeFunction(_) => Err(Error::Format(
+            "FormatTypeError: %x cannot serialize function".into(),
+        )),
+    }
 }
 fn debug_render(v: &Value) -> String {
     match v {
