@@ -2305,15 +2305,27 @@ fn validate_descriptor_spec(
                 // independently matches any member of its set).
                 let alternatives: Vec<String> = match entry {
                     Value::Str(name) => vec![name.clone()],
-                    Value::Array(set) if !set.is_empty() => set
-                        .iter()
-                        .map(|member| match member {
-                            Value::Str(name) => Ok(name.clone()),
-                            _ => Err(Error::Type(
-                                "module descriptor spec.type set members must be strings".into(),
-                            )),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
+                    Value::Array(set) if !set.is_empty() => {
+                        let names = set
+                            .iter()
+                            .map(|member| match member {
+                                Value::Str(name) => Ok(name.clone()),
+                                _ => Err(Error::Type(
+                                    "module descriptor spec.type set members must be strings"
+                                        .into(),
+                                )),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        // `any` is the top/wildcard constraint and must appear only as a
+                        // standalone entry, never combined with alternative types in a set.
+                        if names.iter().any(|name| name == "any") {
+                            return Err(Error::Type(
+                                "module descriptor spec.type `any` cannot be combined with alternative types"
+                                    .into(),
+                            ));
+                        }
+                        names
+                    }
                     Value::Array(_) => {
                         return Err(Error::Type(
                             "module descriptor spec.type sets must not be empty".into(),
@@ -2365,8 +2377,9 @@ fn validate_descriptor(fields: &Rc<Vec<(String, Value)>>, vals: &[Value]) -> Res
     }
     for (index, (accepted, actual)) in types.iter().zip(vals).enumerate() {
         let actual_type = value_type(actual);
-        // "any" matches every type, both as a singleton entry and inside an
-        // alternative set (where it dominates the set).
+        // "any" is the top/wildcard constraint — valid only as a standalone
+        // singleton entry (sets containing it are rejected at registration) —
+        // and matches every type.
         let matches = accepted
             .iter()
             .any(|name| name == "any" || name == actual_type);

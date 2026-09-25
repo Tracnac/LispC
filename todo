@@ -76,28 +76,15 @@ Feature
 
 - use special-cases the AST shape (let …) instead of evaluating normally. (from 10)
 
-- Open: spec.type maps each argument to exactly ONE type name, so it cannot express
-  per-argument alternatives — the "polymorphic-argument hole". Current contract, locked in
-  src/main.rs (validate_descriptor_spec ~2293, validate_descriptor ~2330):
-  * spec.type is an array of exactly `arity` strings; entry i is checked as
-    value_type(arg_i) == entry_i, or passes if entry_i == "any". Errors:
-    "module function argument N expects T, got V".
-  * Registration rejects: wrong length ("spec.type length must match spec.arity"), non-string
-    entries ("spec.type entries must be strings"), arity-0 `type: []` ("spec.type must be an
-    array, or _ for arity 0") — arity 0 uses `type: _`.
-  * Entries are NOT validated against the type vocabulary: a typo like "all" registers fine and
-    then can never match (silent trap). `return` is declaration-only (shape-checked, never
-    enforced). fn params are bare identifiers (no destructuring/aliases); a `^` argument handed
-    to a descriptor is type-checked as "ref" and rejected unless the entry is "any".
-  Reproducer:
-      (use (let m {f: {_: (fn (x) x) spec: {documentation: "f" arity: 1
-            type: [["string" "int"]] return: []}}}))
-      → TypeError "spec.type entries must be strings"    ; cannot declare "string OR int"
-  Workaround today: `type: ["any"]` (accepts everything, loses the declared contract). This hole
-  is PER-ARGUMENT alternatives (each argument independently matches a set; allowed combinations
-  are the cross product) — NOT signatures across the whole argument list (overloads: multiple
-  (arity, type[]) rows with correlated constraints), which is a separate, bigger feature.
-  Smallest change: keep one row of `arity` entries; each entry is either a single type name
-  (current contract) or an array of type names (per-argument alternatives; "any" inside =
-  wildcard), and validate every entry against the vocabulary at registration. Tests in
-  src/tests/modules.rs.
+- Resolved: spec.type per-argument alternatives + vocabulary validation. Each of the `arity` (fixed integer) entries in `type` is a single type name (exact match), a
+  non-empty array of type names (per-argument alternatives: the argument independently matches
+  any member; allowed combinations are the cross product — never whole-signature overloads), or
+  the `"any"` wildcard — which is the top type and may appear ONLY as a standalone entry:
+  `['int']` → exactly int, `[['int' 'float']]` → int|float, `['any']` → all value types,
+  `[['int' 'any']]` → registration error ("spec.type `any` cannot be combined with alternative
+  types"), never silently normalized. All names validated at registration against the vocabulary
+  null|bool|int|float|string|array|struct|function|ref|any (unknown names and empty sets fail
+  fast). Mismatch error widens to "expects one of X, Y, got Z" for sets; singleton messages
+  unchanged. `return` stays declaration-only. Spec stays live: `set` into `spec.type` affects
+  every subsequent call. 470 tests green (debug+release), fmt/clippy clean; README + spec.txt §2
+  document the syntax and the alternatives-vs-overloads distinction. (was the polymorphic-argument hole)

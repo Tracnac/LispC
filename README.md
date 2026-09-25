@@ -59,10 +59,12 @@ spec: { documentation: "add" arity: 2
 ```
 
 The type vocabulary is `null | bool | int | float | string | array | struct | function | ref |
-any`. `"any"` accepts every type — as a bare singleton entry or inside an alternative set, where
-it dominates the set. Unknown type names and empty alternative sets are rejected when the module
-is registered, never silently accepted as never-matching declarations. `arity` stays a single
-fixed integer and `type` length must always equal it: alternatives are per-argument only (the
+any`. `"any"` is the top/wildcard type: it accepts every value type and must appear **only** as
+a standalone entry (`type: ["any"]`) — combining it with alternative types in a set
+(`type: [["int" "any"]]`) is a registration error, never silently normalized to `"any"`.
+Unknown type names, empty alternative sets, and sets containing `"any"` are rejected when the
+module is registered, never silently accepted as never-matching declarations. `arity` stays a
+single fixed integer and `type` length must always equal it: alternatives are per-argument only (the
 allowed combinations are the cross product of the per-argument sets), never whole-signature
 overloads. `return` is declaration-only and not enforced at call time.
 

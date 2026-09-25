@@ -280,22 +280,15 @@ fn spec_type_alternatives_are_independent_per_argument_position() {
 }
 
 #[test]
-fn spec_type_any_accepts_everything_bare_and_inside_a_set() {
-    // "any" inside an alternative set dominates it: every type is accepted.
-    let value = run(
-        r#"(use (let m {
-                f: {_: (fn (x) x) spec: {documentation: "f" arity: 1 type: [["int" "any"]] return: []}}
+fn spec_type_any_as_a_standalone_entry_accepts_everything() {
+    // Bare "any" singleton (the http-post-style body stopgap) accepts every type.
+    let value = run(r#"(use (let m {
+                f: {_: (fn (x) x) spec: {documentation: "f" arity: 1 type: ["any"] return: []}}
             }))
             (expect (m.f 42) 42)
             (expect (m.f "s") "s")
-            (expect (m.f {a: 1}) {a: 1}) t"#,
-    )
-    .unwrap();
-    assert!(matches!(value, Value::Bool(_)));
-    // Bare "any" singleton (the http-post-style body stopgap) keeps working.
-    let value = run(r#"(use (let m {
-                f: {_: (fn (x) x) spec: {documentation: "f" arity: 1 type: ["any"] return: []}}
-            })) (expect (m.f [1 2]) [1 2]) t"#)
+            (expect (m.f {a: 1}) {a: 1})
+            (expect (m.f [1 2]) [1 2]) t"#)
     .unwrap();
     assert!(matches!(value, Value::Bool(_)));
 }
@@ -345,6 +338,20 @@ fn spec_type_registration_rejects_invalid_entries() {
     assert!(matches!(
         run(&descriptor(r#"[[]]"#)),
         Err(Error::Type(message)) if message.contains("sets must not be empty")
+    ));
+    // "any" is the top/wildcard type and may only appear as a standalone entry:
+    // combining it with alternative types in a set is a registration error
+    // (never silently normalized to "any").
+    assert!(matches!(
+        run(&descriptor(r#"[["int" "any"]]"#)),
+        Err(Error::Type(message))
+            if message.contains("`any` cannot be combined with alternative types")
+    ));
+    // Even a set containing only "any" is not a standalone entry.
+    assert!(matches!(
+        run(&descriptor(r#"[["any"]]"#)),
+        Err(Error::Type(message))
+            if message.contains("`any` cannot be combined with alternative types")
     ));
     // Non-string set members are rejected.
     assert!(matches!(
