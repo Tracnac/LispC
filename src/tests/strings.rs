@@ -783,6 +783,15 @@ fn format_tilde_regex_optional_group_emits_underscore() {
 }
 
 #[test]
+fn regex_matches_scalars_while_string_indexing_uses_graphemes() {
+    // Rust's regex matches Unicode scalar values: `(.)` captures a single scalar —
+    // the base emoji — splitting the 👍🏽 grapheme (base + skin-tone modifier = 2
+    // scalars, 1 grapheme). String indexing is grapheme-based: [1] yields it whole.
+    check(r#"($ "%~%2" "(.)" "👍🏽")"#, r#""👍""#);
+    check(r#"(let s "👍🏽") (expect s[1] "👍🏽")"#, r#"t"#);
+}
+
+#[test]
 fn format_tilde_regex_identifier_regex_argument() {
     check(
         r#"(let regex "mgU~^(.*) ") ($ "%~%2" regex "Hello the world")"#,

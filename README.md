@@ -53,6 +53,9 @@ bytes or Unicode scalar values.
 Regex matching happens inside `$` formatting: the `%~` specifier applies a regex (with options)
 to an argument, and `%M.C` / `%N` emit whole matches and capture groups (see Formatting above).
 The engine is Rust's UTF-8 `regex`. An unmatched optional group emits `_`; no match at all emits `f`.
+Regexes match Unicode scalar values, not grapheme clusters: `(.)` on "👍🏽" (base emoji +
+skin-tone modifier, two scalars) captures just the base "👍", while string indexing is
+grapheme-based and returns the whole cluster.
 
 ### Runtime eval
 

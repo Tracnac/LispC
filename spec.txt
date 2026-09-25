@@ -304,6 +304,11 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 * Les regex utilisent le moteur Rust `regex` et opèrent sur des strings UTF-8. Pour chaque
   correspondance, la cellule 1 est la correspondance complète et les groupes capturants suivent
   dans leur ordre : cellule 2 = premier groupe, cellule 3 = deuxième, etc.
+* Les regex opèrent sur des valeurs scalaires Unicode, pas sur des graphèmes : une correspondance
+  ou une capture peut commencer ou finir au milieu d'un graphème. Par exemple, sur `"👍🏽"` (base
+  emoji + modificateur de teint, deux scalaires), le groupe `(.)` capture la base (`👍`), alors
+  que l'indexation d'une string (§1) retournerait le graphème complet. L'option `u` (défaut)
+  conserve ce comportement scalaire.
 * Un groupe optionnel non correspondant produit `_` ; une string sans aucune correspondance
   produit `f` pour tout sélecteur.
 * Une regex invalide produit InvalidRegex avec le diagnostic du moteur ; un argument non-string
