@@ -1,9 +1,19 @@
 Performance
 ===========
 
-- Deep copy on every read — the core cost of the "value semantics with explicit ^ aliasing" design. Every variable read, field access, and index (src/main.rs:821, 824, 896, 901, 919) does a full recursive copy() of arrays/structs, and every set/bind runs a full O(n) graph walk with fresh HashSets for cycle detection. Combined with per-element Cell allocation, arrays are expensive to build and to access. Fine for a scripting interpreter, but it's the root of both the crash fixed in 1–4 and most constant-factor slowness. A persistent/shared representation would help. (was 5)
+- Resolved: descriptor spec was re-validated on every module call — validate_descriptor →
+  validate_descriptor_spec (src/main.rs) deep-copied each spec field (spec struct, then
+  documentation/arity/type/return, including full copies of the type and return arrays) per
+  check per call. validate_descriptor_spec now borrows the cells in place (field_cell /
+  spec_borrow, no copy()); every check and error message is unchanged, and the spec is still
+  read live at each call, so `set` into a bound module's descriptor takes effect immediately
+  (locked by a test in src/tests/modules.rs). Benchmark (release, 100k calls to str.upper in a
+  loop, best of 5): 250 ms → 178 ms — the module-call tax dropped ~40% (~0.7 µs/call), with
+  plain-fn and bare-loop baselines unchanged. Residual: an (arity, type) identity cache would
+  remove the remaining scans, but it would go stale if `set` mutates a spec — that belongs
+  with the persistent-representation work below. (was 10)
 
-- Descriptor spec is re-validated on every module call (validate_descriptor → validate_descriptor_spec in the call path). (from 10)
+- Deep copy on every read — the core cost of the "value semantics with explicit ^ aliasing" design. Every variable read, field access, and index (src/main.rs:821, 824, 896, 901, 919) does a full recursive copy() of arrays/structs, and every set/bind runs a full O(n) graph walk with fresh HashSets for cycle detection. Combined with per-element Cell allocation, arrays are expensive to build and to access. Fine for a scripting interpreter, but it's the root of both the crash fixed in 1–4 and most constant-factor slowness. A persistent/shared representation would help. (was 5)
 
 Bug
 ===

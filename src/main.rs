@@ -2020,56 +2020,61 @@ fn validate_module(value: &Value) -> Result<(), Error> {
 fn validate_descriptor_spec(
     fields: &Rc<RefCell<Vec<(String, Cell)>>>,
 ) -> Result<(usize, Vec<String>), Error> {
-    let field = |name: &str| {
+    // This runs on every descriptor call, while module members were already
+    // validated once at `use` time — so read the spec by borrowing its cells
+    // in place instead of deep-copying each field: copy() allocates a fresh
+    // cell/struct/array for every check on every call. The checks and error
+    // messages below are unchanged; only the copies are gone. The spec's
+    // cells are never mutated while validating, so holding the borrow across
+    // the lookups is safe.
+    let field_cell = |name: &str| {
         fields
             .borrow()
             .iter()
             .find(|(key, _)| key == name)
-            .map(|(_, cell)| copy(&cell.borrow()))
+            .map(|(_, cell)| cell.clone())
     };
-    let callable = fields
-        .borrow()
-        .iter()
-        .find(|(key, _)| key == "_")
-        .map(|(_, cell)| cell.borrow().clone());
-    match callable {
-        Some(value) if is_callable(&value) => {}
+    match field_cell("_") {
+        Some(cell) if is_callable(&cell.borrow()) => {}
         Some(_) => return Err(Error::Type("module descriptor _ must be callable".into())),
         None => return Err(Error::Type("module descriptor must contain _".into())),
     }
-    let spec = match field("spec") {
-        Some(Value::Struct(spec)) => spec,
-        Some(_) => {
-            return Err(Error::Type(
-                "module descriptor spec must be a struct".into(),
-            ))
-        }
+    let spec = match field_cell("spec") {
+        Some(cell) => match &*cell.borrow() {
+            Value::Struct(spec) => spec.clone(),
+            _ => {
+                return Err(Error::Type(
+                    "module descriptor spec must be a struct".into(),
+                ))
+            }
+        },
         None => {
             return Err(Error::Type(
                 "module descriptor must contain a spec field".into(),
             ))
         }
     };
+    let spec_borrow = spec.borrow();
     let spec_field = |name: &str| {
-        spec.borrow()
+        spec_borrow
             .iter()
             .find(|(key, _)| key == name)
-            .map(|(_, cell)| copy(&cell.borrow()))
+            .map(|(_, cell)| cell.borrow())
     };
-    if !matches!(spec_field("documentation"), Some(Value::Str(_))) {
+    if !matches!(spec_field("documentation").as_deref(), Some(Value::Str(_))) {
         return Err(Error::Type(
             "module descriptor spec.documentation must be a string".into(),
         ));
     }
-    let arity = match spec_field("arity") {
-        Some(Value::Int(arity)) if arity >= 0 => arity as usize,
+    let arity = match spec_field("arity").as_deref() {
+        Some(Value::Int(arity)) if *arity >= 0 => *arity as usize,
         _ => {
             return Err(Error::Type(
                 "module descriptor spec.arity must be an integer".into(),
             ))
         }
     };
-    let types = match spec_field("type") {
+    let types = match spec_field("type").as_deref() {
         Some(Value::Null) if arity == 0 => Vec::new(),
         Some(Value::Array(types)) if arity > 0 => types
             .borrow()
@@ -2092,7 +2097,10 @@ fn validate_descriptor_spec(
             "module descriptor spec.type length must match spec.arity".into(),
         ));
     }
-    if !matches!(spec_field("return"), Some(Value::Null | Value::Array(_))) {
+    if !matches!(
+        spec_field("return").as_deref(),
+        Some(Value::Null | Value::Array(_))
+    ) {
         return Err(Error::Type(
             "module descriptor spec.return must be an array or null".into(),
         ));

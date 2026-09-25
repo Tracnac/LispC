@@ -19,6 +19,28 @@ fn native_str_module_is_loaded_and_introspectable() {
 }
 
 #[test]
+fn module_descriptor_spec_is_checked_live_on_every_call() {
+    // The spec is read fresh at each call, so `set` into a bound module's
+    // descriptor takes effect immediately — a cached (arity, type) would go
+    // stale here.
+    let value = run(r#"(use "str")
+               (set str.upper.spec.arity 2)
+               (set str.upper.spec.type ["string" "string"])
+               (str.upper "a" "b")"#)
+    .unwrap();
+    assert!(matches!(value, Value::Str(text) if text == "A"));
+    // An inconsistent mutated spec is caught at call time with the usual
+    // message rather than being skipped.
+    assert!(matches!(
+        run(r#"(use "str")
+           (set str.upper.spec.arity 2)
+           (str.upper "a")"#),
+        Err(Error::Type(message))
+            if message.contains("spec.type length must match spec.arity")
+    ));
+}
+
+#[test]
 fn use_accepts_string_names_and_rejects_unknown_modules() {
     let value = run(r#"(use "str") (str.upper "hello")"#).unwrap();
     assert!(matches!(value, Value::Str(text) if text == "HELLO"));
