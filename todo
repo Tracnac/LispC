@@ -92,7 +92,23 @@ Bug
 Feature
 =======
 
-- use special-cases the AST shape (let …) instead of evaluating normally. (from 10)
+- Resolved: `use` AST special-case removed — modules are defined and registered in two
+  separate steps, and `use` evaluates its argument normally (no AST peek). `(let name {…})`
+  defines a module (plain binding); `(use "name")` evaluates its argument to a name string,
+  then either loads a native (`io`/`str`/`http`, binding like `let` — duplicate in the same
+  scope stays DuplicateBindingError) or looks up the existing binding, validates the module
+  syntax and registers it in the current scope (at most once per scope — ModuleError
+  "module `X` is already registered"; shadowing in a child scope registers afresh, like
+  `let`). Unknown names → NameError "module `X` is not defined"; the old
+  `(use (let m {…}))` shape is gone (the arg evaluates to Null → TypeError "expected
+  string"). This also kills the pre-existing ordering leak by construction: validation now
+  always happens before anything is committed, so a failed registration binds/registers
+  nothing (probes: `(use (let m 5))` left `m=5` bound; `(use (let m {f: 1}))` left `m`
+  bound to the broken struct). Env gained a per-scope `modules` list; new Error::Module
+  variant; src/tests/modules.rs converted to the two-step form + 4 new registration tests;
+  core.rs reserved-name check updated; spec.txt §2.1 and README "### Module descriptors"
+  updated. `examples/quick.lisp` still uses the old one-step shape (user WIP, untouched).
+  (was 10)
 
 - Resolved: spec.type per-argument alternatives + vocabulary validation. Each of the `arity` (fixed integer) entries in `type` is a single type name (exact match), a
   non-empty array of type names (per-argument alternatives: the argument independently matches

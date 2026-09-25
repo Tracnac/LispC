@@ -381,10 +381,10 @@ fn binding_form_and_builtin_names_is_rejected() {
             "expected reserved-name error for {src}"
         );
     }
-    // The `use` special form can carry a `(let name value)` shape; it goes
-    // through the same check.
+    // The define-then-use module flow goes through the same check: the defining
+    // `let` is evaluated normally by `use` and rejects reserved names.
     assert!(matches!(
-        run("(use (let set 1))"),
+        run("(let set 1) (use \"set\")"),
         Err(Error::Type(message)) if message.contains("reserved name cannot be bound")
     ));
     // Function parameters are protected too.

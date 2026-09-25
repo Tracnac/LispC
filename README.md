@@ -68,6 +68,22 @@ single fixed integer and `type` length must always equal it: alternatives are pe
 allowed combinations are the cross product of the per-argument sets), never whole-signature
 overloads. `return` is declaration-only and not enforced at call time.
 
+A Lisp module is defined with `let` and registered with `use`, which validates its syntax:
+
+```lisp
+(let mymodule {
+    greet: {_: (fn (name) ($ "Hello %s!" name))
+            spec: {documentation: "Greets a person." arity: 1 type: ["string"] return: ["string"]}}
+})
+(use "mymodule")
+(mymodule.greet "Yvan")          ; "Hello Yvan!"
+```
+
+`use "name"` loads a native module (`io`, `str`, `http`), binding it like `let` (a duplicate in
+the same scope is `DuplicateBindingError`); for a user-defined module it looks up the existing
+binding, validates the module syntax, and registers it — at most once per scope
+(`ModuleError` otherwise, with shadowing in a child scope registering afresh).
+
 ### Arrays and strings
 
 Array indexes are 1-based and support negative indexes. Ranges are inclusive and may omit either

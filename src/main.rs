@@ -69,6 +69,10 @@ struct NativeFunction {
 }
 struct Env {
     values: Vec<(String, Cell)>,
+    /// Names of modules registered by `use` in this scope (natives bind like
+    /// `let`; Lisp modules are validated and recorded here, at most once per
+    /// scope — shadowing in a child scope registers afresh).
+    modules: Vec<String>,
     parent: Option<EnvRef>,
 }
 
@@ -113,6 +117,7 @@ enum Literal {
 enum Error {
     Parse(String),
     Name(String),
+    Module(String),
     Type(String),
     Arity(String),
     Math(String),
@@ -136,6 +141,7 @@ impl fmt::Display for Error {
         match self {
             Parse(s) => write!(f, "ParseError: {s}"),
             Name(s) => write!(f, "NameError: {s}"),
+            Module(s) => write!(f, "ModuleError: {s}"),
             Type(s) => write!(f, "TypeError: {s}"),
             Arity(s) => write!(f, "ArityError: {s}"),
             Math(s) => write!(f, "MathError: {s}"),
@@ -703,6 +709,7 @@ impl Parser {
 fn new_env(parent: Option<EnvRef>) -> EnvRef {
     Rc::new(RefCell::new(Env {
         values: vec![],
+        modules: vec![],
         parent,
     }))
 }
@@ -2133,27 +2140,35 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
             }
             "use" => {
                 need(args, 1, "use")?;
-                let mut bound = false;
-                let (name, module) = match &args[0].kind {
-                    ExprKind::Call(let_head, let_args) if matches!(&let_head.kind, ExprKind::Symbol(name) if name == "let") =>
-                    {
-                        let (name, module) = define_let(let_args, env, l, m)?;
-                        bound = true;
-                        (name, module)
-                    }
-                    ExprKind::Lit(Literal::Str(name)) => (name.clone(), native_module(name)?),
-                    _ => {
-                        let name = as_str(eval(&args[0], env, l, m)?)?;
-                        let module = native_module(&name)?;
-                        (name, module)
-                    }
-                };
-                validate_module(&module).map_err(Flow::Error)?;
-                if !bound {
+                // The argument is evaluated normally and must name a module: a
+                // native module ("io", "str", "http") or a Lisp module previously
+                // defined with `(let name {…})`. `use` validates the module's
+                // syntax and registers it; natives additionally bind like `let`.
+                let name = as_str(eval(&args[0], env, l, m)?)?;
+                if let Some(factory) = modules::registry().remove(&name) {
+                    let module = factory();
+                    validate_module(&module).map_err(Flow::Error)?;
                     // Never overwrite an existing binding: only `set` modifies one
                     // (a duplicate in the current scope is DuplicateBindingError).
                     bind_module(&name, module.clone(), env).map_err(Flow::Error)?;
+                    env.borrow_mut().modules.push(name);
+                    return Ok(module);
                 }
+                // A Lisp module: the defining `(let name {…})` already bound it;
+                // `use` validates the syntax and records the registration here.
+                let Some(cell) = lookup(env, &name) else {
+                    return Err(Error::Name(format!("module `{name}` is not defined")).into());
+                };
+                if env.borrow().modules.iter().any(|n| n == &name) {
+                    return Err(
+                        Error::Module(format!("module `{name}` is already registered")).into(),
+                    );
+                }
+                let module = cell.borrow().clone();
+                // Validate before registering: a failed registration must not
+                // leave the name half-registered.
+                validate_module(&module).map_err(Flow::Error)?;
+                env.borrow_mut().modules.push(name);
                 return Ok(module);
             }
             "$" => return format_value(args, env, l, m, call_span),
@@ -2403,12 +2418,6 @@ fn validate_descriptor(fields: &Rc<Vec<(String, Value)>>, vals: &[Value]) -> Res
 }
 fn is_callable(value: &Value) -> bool {
     matches!(value, Value::Function(_) | Value::NativeFunction(_))
-}
-fn native_module(name: &str) -> Result<Value, Error> {
-    let factory = modules::registry()
-        .remove(name)
-        .ok_or_else(|| Error::Name(format!("unknown native module {name}")))?;
-    Ok(factory())
 }
 fn invoke(f: Value, vals: Vec<Value>, call_span: Span) -> EResult {
     let f = match f {

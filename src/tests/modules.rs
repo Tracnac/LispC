@@ -70,13 +70,13 @@ fn use_accepts_string_names_and_rejects_unknown_modules() {
     ));
     assert!(matches!(
         run("(use \"missing\")"),
-        Err(Error::Name(message)) if message == "unknown native module missing"
+        Err(Error::Name(message)) if message == "module `missing` is not defined"
     ));
 }
 
 #[test]
 fn lisp_modules_are_loaded_from_named_bindings_and_validate_descriptors() {
-    let value = run(r#"(use (let mymodule {
+    let value = run(r#"(let mymodule {
                  add: {
                    _: (fn (x y) x)
                    spec: {
@@ -86,7 +86,8 @@ fn lisp_modules_are_loaded_from_named_bindings_and_validate_descriptors() {
                      return: []
                    }
                  }
-               }))
+               })
+               (use "mymodule")
                (expect mymodule.add.spec.documentation "Return the first string.")
                (expect mymodule.add.spec.arity 2)
                (expect mymodule.add.spec.type ["string" "string"])
@@ -95,15 +96,17 @@ fn lisp_modules_are_loaded_from_named_bindings_and_validate_descriptors() {
     assert!(matches!(value, Value::Str(text) if text == "a"));
 
     assert!(matches!(
-        run(r#"(use (let mymodule {
+        run(r#"(let mymodule {
                 add: {_: (fn (x y) x) spec: {documentation: "add" arity: 2 type: ["string" "string"] return: []}}
-            })) (mymodule.add "a")"#),
+            })
+            (use "mymodule") (mymodule.add "a")"#),
         Err(Error::Arity(message)) if message.contains("expects 2 arguments")
     ));
     assert!(matches!(
-        run(r#"(use (let mymodule {
+        run(r#"(let mymodule {
                 add: {_: (fn (x y) x) spec: {documentation: "add" arity: 2 type: ["string" "string"] return: []}}
-            })) (mymodule.add 10 "b")"#),
+            })
+            (use "mymodule") (mymodule.add 10 "b")"#),
         Err(Error::Type(message)) if message.contains("argument 1 expects string")
     ));
 }
@@ -123,7 +126,7 @@ fn native_descriptors_use_the_same_validation_path() {
 #[test]
 fn module_argument_validation_reports_the_call_site_after_nested_evaluation() {
     let source = r#"
-(use (let module {
+(let module {
     open: {
         _: (fn (x y) (io.write 1 ($ "Called open with args %s and %s\n" x y)))
         spec: {
@@ -133,7 +136,8 @@ fn module_argument_validation_reports_the_call_site_after_nested_evaluation() {
             return: ["string"]
         }
     }
-}))
+})
+(use "module")
 (use "io")
 (use "str")
 (str.lower (module.open "args1" "args2"))
@@ -148,24 +152,26 @@ fn module_argument_validation_reports_the_call_site_after_nested_evaluation() {
     ));
     let span = LAST_ERROR_SPAN.with(|span| span.get());
     let rendered = diagnostic(&error, source, "sample.lisp", span);
-    assert!(rendered.starts_with("sample.lisp:15:"));
+    assert!(rendered.starts_with("sample.lisp:16:"));
     assert!(rendered.contains("(str.lower (module.open"));
 }
 
 #[test]
 fn descriptor_registration_requires_a_complete_callable_spec() {
-    let valid = r#"(use (let module {
+    let valid = r#"(let module {
             foo: {_: (fn (x) x) spec: {
                 documentation: "foo" arity: 1 type: ["string"] return: []
             }}
-        }))"#;
+        })
+        (use "module")"#;
     assert!(run(valid).is_ok());
 
-    let valid_return = r#"(use (let module {
+    let valid_return = r#"(let module {
             foo: {_: (fn (x) x) spec: {
                 documentation: "foo" arity: 1 type: ["string"] return: ["string"]
             }}
-        }))"#;
+        })
+        (use "module")"#;
     assert!(run(valid_return).is_ok());
 
     for spec in [
@@ -178,34 +184,39 @@ fn descriptor_registration_requires_a_complete_callable_spec() {
         r#"{documentation: "foo" arity: 1 type: "string" return: []}"#,
         r#"{documentation: "foo" arity: 1 type: ["string"] return: 1}"#,
     ] {
-        let source = format!("(use (let module {{foo: {{_: (fn (x) x) spec: {spec}}}}}))");
+        let source =
+            format!("(let module {{foo: {{_: (fn (x) x) spec: {spec}}}}}) (use \"module\")");
         assert!(matches!(run(&source), Err(Error::Type(_))), "{source}");
     }
 
     assert!(matches!(
-        run(r#"(use (let module {
+        run(r#"(let module {
                 foo: {spec: {documentation: "foo" arity: 1 type: ["string"] return: []}}
-            }))"#),
+            })
+            (use "module")"#),
         Err(Error::Type(message)) if message.contains("contain _")
     ));
     assert!(matches!(
-        run(r#"(use (let module {
+        run(r#"(let module {
                 foo: {_: 1 spec: {documentation: "foo" arity: 1 type: ["string"] return: []}}
-            }))"#),
+            })
+            (use "module")"#),
         Err(Error::Type(message)) if message.contains("_ must be callable")
     ));
-    assert!(run(r#"(use (let module {
+    assert!(run(r#"(let module {
             foo: {_: (fn () 1) spec: {
                 documentation: "foo" arity: 0 type: _ return: _
             }}
-        })) (module.foo)"#)
+        })
+        (use "module") (module.foo)"#)
     .is_ok());
     assert!(matches!(
-        run(r#"(use (let module {
+        run(r#"(let module {
                 foo: {_: (fn () 1) spec: {
                     documentation: "foo" arity: 0 type: [] return: _
                 }}
-            }))"#),
+            })
+            (use "module")"#),
         Err(Error::Type(message)) if message.contains("spec.type")
     ));
 }
@@ -215,17 +226,19 @@ fn spec_type_singleton_entries_bind_exactly_one_type_per_argument() {
     // A scalar singleton entry keeps the original contract: entry i is the exact
     // type allowed for argument i.
     let value = run(
-        r#"(use (let m {
+        r#"(let m {
                 inc: {_: (fn (x) (add x 1)) spec: {documentation: "inc" arity: 1 type: ["int"] return: []}}
-            })) (expect (m.inc 3) 4) t"#,
+            })
+            (use "m") (expect (m.inc 3) 4) t"#,
     )
     .unwrap();
     assert!(matches!(value, Value::Bool(_)));
     assert!(matches!(
         run(
-            r#"(use (let m {
+            r#"(let m {
                     inc: {_: (fn (x) (add x 1)) spec: {documentation: "inc" arity: 1 type: ["int"] return: []}}
-                })) (m.inc "3")"#
+                })
+                (use "m") (m.inc "3")"#
         ),
         Err(Error::Type(message)) if message.contains("argument 1 expects int, got string")
     ));
@@ -235,9 +248,10 @@ fn spec_type_singleton_entries_bind_exactly_one_type_per_argument() {
 fn spec_type_alternative_sets_accept_any_member_per_argument() {
     // One argument with a bounded set: int OR float is accepted.
     let value = run(
-        r#"(use (let m {
+        r#"(let m {
                 twice: {_: (fn (x) (mul x 2)) spec: {documentation: "twice" arity: 1 type: [["int" "float"]] return: []}}
-            }))
+            })
+            (use "m")
             (expect (m.twice 3) 6)
             (expect (m.twice 3.5) 7.0) t"#,
     )
@@ -246,9 +260,10 @@ fn spec_type_alternative_sets_accept_any_member_per_argument() {
     // A type outside the set is rejected, naming the allowed alternatives.
     assert!(matches!(
         run(
-            r#"(use (let m {
+            r#"(let m {
                     twice: {_: (fn (x) (mul x 2)) spec: {documentation: "twice" arity: 1 type: [["int" "float"]] return: []}}
-                })) (m.twice "3")"#
+                })
+                (use "m") (m.twice "3")"#
         ),
         Err(Error::Type(message))
             if message.contains("argument 1 expects one of int, float, got string")
@@ -259,9 +274,10 @@ fn spec_type_alternative_sets_accept_any_member_per_argument() {
 fn spec_type_alternatives_are_independent_per_argument_position() {
     // arg 1 ∈ {int, float} AND arg 2 = string — the accepted combinations are
     // the cross product, never whole-signature overloads.
-    let module = r#"(use (let m {
+    let module = r#"(let m {
             pick: {_: (fn (x y) x) spec: {documentation: "pick" arity: 2 type: [["int" "float"] "string"] return: []}}
-        }))"#;
+        })
+        (use "m")"#;
     let ok = run(&format!(
         "{module} (expect (m.pick 1 \"a\") 1) (expect (m.pick 1.5 \"a\") 1.5) t"
     ))
@@ -282,9 +298,10 @@ fn spec_type_alternatives_are_independent_per_argument_position() {
 #[test]
 fn spec_type_any_as_a_standalone_entry_accepts_everything() {
     // Bare "any" singleton (the http-post-style body stopgap) accepts every type.
-    let value = run(r#"(use (let m {
+    let value = run(r#"(let m {
                 f: {_: (fn (x) x) spec: {documentation: "f" arity: 1 type: ["any"] return: []}}
-            }))
+            })
+            (use "m")
             (expect (m.f 42) 42)
             (expect (m.f "s") "s")
             (expect (m.f {a: 1}) {a: 1})
@@ -298,9 +315,10 @@ fn spec_type_ref_is_a_first_class_vocabulary_member() {
     // A ^ alias argument satisfies a "ref" expectation; reading it inside the
     // function derefs to the current value.
     let value = run(
-        r#"(use (let m {
+        r#"(let m {
                 head: {_: (fn (x) x) spec: {documentation: "head" arity: 1 type: ["ref"] return: []}}
-            }))
+            })
+            (use "m")
             (let a [1 2])
             (expect (m.head ^a[1]) 1) t"#,
     )
@@ -309,9 +327,10 @@ fn spec_type_ref_is_a_first_class_vocabulary_member() {
     // A plain value is not a ref.
     assert!(matches!(
         run(
-            r#"(use (let m {
+            r#"(let m {
                     head: {_: (fn (x) x) spec: {documentation: "head" arity: 1 type: ["ref"] return: []}}
-                })) (m.head 5)"#
+                })
+                (use "m") (m.head 5)"#
         ),
         Err(Error::Type(message)) if message.contains("argument 1 expects ref, got int")
     ));
@@ -321,7 +340,7 @@ fn spec_type_ref_is_a_first_class_vocabulary_member() {
 fn spec_type_registration_rejects_invalid_entries() {
     let descriptor = |type_field: &str| {
         format!(
-            r#"(use (let m {{f: {{_: (fn (x) x) spec: {{documentation: "f" arity: 1 type: {type_field} return: []}}}}}}))"#
+            r#"(let m {{f: {{_: (fn (x) x) spec: {{documentation: "f" arity: 1 type: {type_field} return: []}}}}}}) (use "m")"#
         )
     };
     // Unknown type names are rejected at registration, never silently registered
@@ -376,9 +395,10 @@ fn spec_type_mutation_affects_subsequent_calls_live() {
     // The spec is read fresh at each call: mutating spec.type from a set to a
     // different set takes effect immediately.
     let value = run(
-        r#"(use (let m {
+        r#"(let m {
                 f: {_: (fn (x) x) spec: {documentation: "f" arity: 1 type: [["int" "float"]] return: []}}
-            }))
+            })
+            (use "m")
             (expect (m.f 3) 3)
             (set m.f.spec.type [["string"]])
             (expect (m.f "ok") "ok") t"#,
@@ -388,9 +408,10 @@ fn spec_type_mutation_affects_subsequent_calls_live() {
     // After the mutation the previously-valid argument type fails at call time.
     assert!(matches!(
         run(
-            r#"(use (let m {
+            r#"(let m {
                     f: {_: (fn (x) x) spec: {documentation: "f" arity: 1 type: [["int" "float"]] return: []}}
-                }))
+                })
+                (use "m")
                 (set m.f.spec.type [["string"]])
                 (m.f 3)"#
         ),
@@ -400,8 +421,10 @@ fn spec_type_mutation_affects_subsequent_calls_live() {
 
 #[test]
 fn use_binds_like_let_and_never_modifies_an_existing_binding() {
-    // `use` defines a module name in the current scope (like `let`): it must
-    // never overwrite an existing variable — only `set` modifies a binding (§4).
+    // For native modules, `use` defines the name in the current scope (like
+    // `let`): it must never overwrite an existing variable — only `set`
+    // modifies a binding (§4). A Lisp module is pre-defined by `let`; `use`
+    // validates and registers it (see the tests below).
     assert!(matches!(
         run(r#"(let io "user value") (use "io")"#),
         Err(Error::DuplicateBinding(name)) if name == "io"
@@ -413,4 +436,71 @@ fn use_binds_like_let_and_never_modifies_an_existing_binding() {
     // Shadowing across scopes stays allowed and leaves the outer binding alone.
     let value = run(r#"(use "io") (() (use "str")) ($ "%t" (use "str"))"#).unwrap();
     assert!(matches!(value, Value::Str(text) if text == "struct"));
+}
+
+#[test]
+fn use_registers_a_predefined_lisp_module_and_returns_it() {
+    // The supported way to register a Lisp module: `(let name {…})` defines it,
+    // `(use "name")` validates its syntax and registers it.
+    let value = run(r#"(let mymodule {
+                greet: {_: (fn (name) ($ "Hello %s!" name)) spec: {
+                    documentation: "Greets a person."
+                    arity: 1
+                    type: ["string"]
+                    return: ["string"]
+                }}
+            })
+            (let registered (use "mymodule"))
+            (expect (mymodule.greet "Yvan") "Hello Yvan!")
+            ($ "%t" registered)"#)
+    .unwrap();
+    assert!(matches!(value, Value::Str(text) if text == "struct"));
+}
+
+#[test]
+fn use_requires_the_module_to_be_defined_and_valid() {
+    // An unknown name is a NameError, not a silently-created empty module.
+    assert!(matches!(
+        run(r#"(use "no-such-module")"#),
+        Err(Error::Name(message)) if message == "module `no-such-module` is not defined"
+    ));
+    // The binding must actually be a valid module: `use` validates the syntax.
+    assert!(matches!(
+        run(r#"(let x 5) (use "x")"#),
+        Err(Error::Type(message)) if message.contains("module must be a struct")
+    ));
+    assert!(matches!(
+        run(r#"(let m {f: 1}) (use "m")"#),
+        Err(Error::Type(message)) if message.contains("module members must be callable descriptors")
+    ));
+}
+
+#[test]
+fn a_failed_registration_leaves_the_module_unregistered() {
+    // Validation happens before the registration is recorded: retrying after a
+    // bad definition reports the same validation error, not a duplicate-
+    // registration error.
+    assert!(matches!(
+        run(r#"(let m {f: 1}) (use "m") (use "m")"#),
+        Err(Error::Type(message)) if message.contains("module members must be callable descriptors")
+    ));
+}
+
+#[test]
+fn use_registers_at_most_once_per_scope() {
+    // Twice in the same scope is a ModuleError; shadowing in a child scope is a
+    // fresh registration (like `let`).
+    assert!(matches!(
+        run(r#"(let m {f: {_: (fn () 1) spec: {documentation: "f" arity: 0 type: _ return: _}}})
+            (use "m") (use "m")"#),
+        Err(Error::Module(message)) if message == "module `m` is already registered"
+    ));
+    let value = run(
+        r#"(let m {f: {_: (fn () 1) spec: {documentation: "f" arity: 0 type: _ return: _}}})
+            (use "m")
+            (() (use "m") (m.f) t)
+            (m.f)"#,
+    )
+    .unwrap();
+    assert!(matches!(value, Value::Int(x) if x == 1));
 }
