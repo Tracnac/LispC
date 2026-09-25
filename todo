@@ -76,4 +76,28 @@ Feature
 
 - use special-cases the AST shape (let …) instead of evaluating normally. (from 10)
 
-- Module descriptor spec.type has a design hole: each argument maps to exactly one type name, which cannot express polymorphic arguments. The `"any"` marker (added for the http module body, src/modules/http.rs) is a stopgap that matches any value type but is not part of the core type vocabulary — decide how to model it properly (e.g. type unions, a first-class Any, or per-arg validator functions).
+- Open: spec.type maps each argument to exactly ONE type name, so it cannot express
+  per-argument alternatives — the "polymorphic-argument hole". Current contract, locked in
+  src/main.rs (validate_descriptor_spec ~2293, validate_descriptor ~2330):
+  * spec.type is an array of exactly `arity` strings; entry i is checked as
+    value_type(arg_i) == entry_i, or passes if entry_i == "any". Errors:
+    "module function argument N expects T, got V".
+  * Registration rejects: wrong length ("spec.type length must match spec.arity"), non-string
+    entries ("spec.type entries must be strings"), arity-0 `type: []` ("spec.type must be an
+    array, or _ for arity 0") — arity 0 uses `type: _`.
+  * Entries are NOT validated against the type vocabulary: a typo like "all" registers fine and
+    then can never match (silent trap). `return` is declaration-only (shape-checked, never
+    enforced). fn params are bare identifiers (no destructuring/aliases); a `^` argument handed
+    to a descriptor is type-checked as "ref" and rejected unless the entry is "any".
+  Reproducer:
+      (use (let m {f: {_: (fn (x) x) spec: {documentation: "f" arity: 1
+            type: [["string" "int"]] return: []}}}))
+      → TypeError "spec.type entries must be strings"    ; cannot declare "string OR int"
+  Workaround today: `type: ["any"]` (accepts everything, loses the declared contract). This hole
+  is PER-ARGUMENT alternatives (each argument independently matches a set; allowed combinations
+  are the cross product) — NOT signatures across the whole argument list (overloads: multiple
+  (arity, type[]) rows with correlated constraints), which is a separate, bigger feature.
+  Smallest change: keep one row of `arity` entries; each entry is either a single type name
+  (current contract) or an array of type names (per-argument alternatives; "any" inside =
+  wildcard), and validate every entry against the vocabulary at registration. Tests in
+  src/tests/modules.rs.
