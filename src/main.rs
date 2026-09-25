@@ -1332,9 +1332,16 @@ fn invoke_operator(value: Value, vals: Vec<Value>, call_span: Span) -> EResult {
                 LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
                 return Err(error.into());
             }
+            let call = fields
+                .borrow()
+                .iter()
+                .find(|(key, _)| key == "_")
+                .map(|(_, cell)| copy(&cell.borrow()))
+                .expect("descriptor pair guarantees a _ field");
+            return invoke(call, vals, call_span);
         }
     }
-    invoke(operator_value(value), vals, call_span)
+    invoke(value, vals, call_span)
 }
 fn validate_module(value: &Value) -> Result<(), Error> {
     let Value::Struct(fields) = value else {
@@ -1462,19 +1469,6 @@ fn native_module(name: &str) -> Result<Value, Error> {
         .remove(name)
         .ok_or_else(|| Error::Name(format!("unknown native module {name}")))?;
     Ok(factory())
-}
-fn operator_value(value: Value) -> Value {
-    match value {
-        Value::Struct(fields) => fields
-            .borrow()
-            .iter()
-            .find(|(key, _)| key == "_")
-            .map(|(_, value)| value.clone())
-            .map_or(Value::Struct(fields.clone()), |value| {
-                operator_value(copy(&value.borrow()))
-            }),
-        value => value,
-    }
 }
 fn invoke(f: Value, vals: Vec<Value>, call_span: Span) -> EResult {
     let f = match f {

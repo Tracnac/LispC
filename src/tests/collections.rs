@@ -57,13 +57,40 @@ fn structs_unwrap_the_underscore_field_only_in_operator_position() {
 }
 
 #[test]
-fn struct_underscore_field_is_callable_without_module_descriptor_spec() {
-    check("(let wtf {a:\"Some\" _:(fn () 10)}) (wtf)", "10");
+fn only_full_callable_descriptors_unwrap_in_operator_position() {
+    // A `_` field alone does not make a struct callable: only the descriptor
+    // pair {_: callable spec: ...} unwraps, and only in operator position.
+    assert!(matches!(
+        run(r#"(let wtf {a:"Some" _:(fn () 10)}) (wtf)"#),
+        Err(Error::Type(message)) if message == "value is not callable"
+    ));
+    assert!(matches!(
+        run(r#"(let fn-as-field {_:(fn (x y) (add x y))}) (fn-as-field 2 3)"#),
+        Err(Error::Type(message)) if message == "value is not callable"
+    ));
+    assert!(matches!(
+        run(r#"(let nested {inner:{_:(fn () 7)}}) (nested.inner)"#),
+        Err(Error::Type(message)) if message == "value is not callable"
+    ));
+}
+
+#[test]
+fn descriptor_unwraps_exactly_one_level_and_rejects_non_callable_slots() {
+    // The descriptor form {_: callable spec: ...} is the only callable struct.
     check(
-        "(let fn-as-field {_:(fn (x y) (add x y))}) (fn-as-field 2 3)",
-        "5",
+        "(let module {open: {_: (fn () 42) spec: {documentation: \"open\" arity: 0 type: _ return: []}}}) (module.open)",
+        "42",
     );
-    check("(let nested {inner:{_:(fn () 7)}}) (nested.inner)", "7");
+    // A descriptor whose `_` is itself a struct (not a function) fails
+    // validation — no `_` chain is ever unwrapped.
+    assert!(matches!(
+        run(
+            r#"(let inner {_: (fn () 7) spec: {documentation: "i" arity: 0 type: _ return: []}})
+               (let outer {_: inner spec: {documentation: "o" arity: 0 type: _ return: []}})
+               (outer)"#
+        ),
+        Err(Error::Type(message)) if message == "module descriptor _ must be callable"
+    ));
 }
 
 #[test]

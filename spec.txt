@@ -65,6 +65,10 @@ Les symboles `t`, `f`, `_`, `NaN`, `+NaN`, `Inf`, `+Inf` et `-Inf` sont des litt
   validés dès l'enregistrement du module et `arity`/`type` sont également appliqués à chaque appel.
   Un module natif est une struct ordinaire ; ses membres appelables utilisent un champ `_`
   et un champ `spec`, comme les descripteurs Lisp.
+* Seule une struct qui est un descripteur complet (champ `_` et champ `spec`) est appelable :
+  l'appel déroule la valeur de `_` — validée appelable — en exactement un niveau et applique
+  `spec`. Un champ `_` seul ne rend jamais une struct appelable et n'est jamais déroulé ; il
+  n'existe donc pas de chaînes ni de cycles de `_`.
 
 3. Grammaire
 form        := call | block | array | struct | literal | field-access | ref

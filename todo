@@ -15,7 +15,11 @@ Bug
 Feature
 =======
 
-- _ is doing three jobs — null literal, regex gap marker, and the magic "callable descriptor" key that makes any struct containing a _ field callable via auto-unboxing (invoke_operator, src/main.rs:1293). That last one is a surprising generalization of the module-descriptor mechanism onto every struct, and operator_value recursion on _ chains is yet another infinite-loop vector in the same family as bug #1. (was 9)
+- Resolved: `_` no longer makes arbitrary structs callable, and unwrapping is no longer
+  recursive. Only the full descriptor pair `{_: callable spec: ...}` auto-unboxes in operator
+  position, exactly one level (invoke_operator); `_` chains/cycles cannot loop because a bare
+  `_` field never unwraps and a descriptor `_` slot is validated callable. Residual: `_` is
+  overloaded as null literal, regex-gap glyph, and descriptor function-slot name. (was 9)
 
 - use special-cases the AST shape (let …) instead of evaluating normally. (from 10)
 
