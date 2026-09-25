@@ -37,6 +37,14 @@ Performance
   sub-linear; and intermediate alias chains make field/nested reads a hair slower than the old
   flat-cell layout. (was 5)
 
+  The Model P semantics were locked by a 10-area audit (13 tests in src/tests/semantics.rs,
+  caeef52): RefLocation holds only (root Cell + path), root replacement invalidates incompatible
+  paths deterministically, reads/binds/args are value snapshots, aliases write through with
+  replace-at-leaf at final positions, cycles still fail with "cyclic reference", and %v keeps
+  the Ref(...) wrapper while %s/%x/%j/%q deref. The 32-way persistent vector remains a SEPARATE
+  future optimization, deliberately not part of this change; re-evaluate only if array-write
+  benchmarks dominate real workloads (see the decision note in the Model P summary).
+
 Bug
 ===
 

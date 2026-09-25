@@ -85,7 +85,10 @@ postfix-access := field-access ("[" selector "]")*
 
 * () est le seul constructeur de scope. if/match n'ouvrent un scope que si leur branche est elle-même un ().
 * . est l'unique forme d'accès à un champ struct. Les tableaux utilisent exclusivement les crochets : arr[1], arr[-1], arr[2..5], arr[[1 3]].
-* . retourne une copie de la valeur (accès par valeur). ^ retourne une référence/alias vers l'emplacement (variable, champ de struct, élément de tableau), voir §7.
+* . retourne la valeur courante (accès par valeur) : un instantané immuable partagé en lecture et
+  isolé en écriture (modèle de valeurs, voir §7). ^ retourne une référence/alias vers l'emplacement
+  (variable, champ de struct, élément de tableau) : un emplacement logique (cellule racine +
+  chemin), résolu contre la valeur courante à chaque lecture/écriture, voir §7.
 
 4. let / set
 * Les deux évaluent strictement leur expression valeur.
@@ -95,6 +98,10 @@ postfix-access := field-access ("[" selector "]")*
   d'un scope parent reste autorisée.
 * set modifie une liaison existante, en remontant la chaîne de scopes jusqu'à la trouver ; il ne
   crée jamais de nouvelle liaison. Erreur NameError si le nom n'existe nulle part.
+* Lire une variable déréférence toute référence qu'elle contient (§7) : `let` lie donc la valeur
+  courante de l'emplacement, pas l'emplacement. `(let q p)` copie la VALEUR courante de p (liaison
+  isolée) ; `(let q (^ p))` lie un second alias vivant du même emplacement. `set` à travers un
+  alias mute l'emplacement cible (§7).
 
 5. Scopes
 * Seul () introduit un nouveau scope lexical ; le haut niveau du programme est lui aussi un scope.
@@ -119,7 +126,10 @@ postfix-access := field-access ("[" selector "]")*
   variadiques (identités -1, 0 et 0) ; `bit-not` exige exactement un argument. `bit-shl` et
   `bit-shr` exigent exactement deux arguments.
 * Il n'y a pas de currying automatique.
-* Passage d'argument par valeur par défaut (copie). Passer ^x fait de l'argument un alias de x : un set dans le corps de la fonction mute la variable de l'appelant.
+* Passage d'argument par valeur par défaut : le paramètre reçoit la valeur courante (instantané
+  immuable partagé en lecture, isolé en écriture, §7). Passer ^x fait de l'argument un alias de x
+  (le même emplacement logique) : un set dans le corps de la fonction mute la variable de
+  l'appelant ; lire le paramètre le déréférence vers la valeur courante.
 * Récursion native : le corps d'un fn n'est évalué qu'à l'appel, et la closure référence son environnement par pointeur, pas besoin de letrec.
 * Profondeur d'appel bornée : la récursion est limitée à 2048 appels imbriqués (`MAX_CALL_DEPTH`).
   Au-delà, l'évaluateur lève `RecursionError: call depth limit (2048) exceeded …` — une erreur de
@@ -152,6 +162,36 @@ postfix-access := field-access ("[" selector "]")*
 (push-zero ^nums)
 (io.write 1 ($ "%d" nums[1]))      ; 0 (mutation en place du tableau)
 * eq déréférence transparemment : comparer une référence à une valeur compare les valeurs pointées, pas des adresses (le langage n'expose aucune notion d'identité de pointeur ailleurs).
+* Modèle de valeurs : les arrays et structs sont des instantanés immuables partagés en lecture.
+  Toute lecture (accès par valeur, argument, let) renvoie la valeur courante sans offrir de vue
+  mutable ; une mutation ne fait que remplacer l'instantané dans la cellule racine (set, §4). Une
+  référence `^` est un EMPLACEMENT logique — cellule racine + chemin de champs/éléments — jamais
+  une valeur ni un instantané : elle est résolue contre la valeur COURANTE à chaque lecture et
+  chaque écriture.
+* Ré-lier la racine déplace l'alias vers la nouvelle valeur : `(let a [1 2]) (let p (^ a[1]))
+  (set a [5 6])` → p vaut 5. Si le remplacement rend le chemin invalide (type incompatible :
+  array remplacée par une struct, champ remplacé par un scalaire, etc.), la résolution échoue
+  déterministiquement avec une erreur de type (« indexing requires an array » / « struct field
+  access requires a struct ») — jamais une donnée obsolète, jamais un repli sur l'ancienne
+  valeur. Le même alias fonctionne de nouveau dès que l'emplacement redevient valide.
+* Lire une liaison contenant une référence déréférence : `(let q p)` copie la VALEUR courante de
+  p (liaison complètement isolée, §4) ; seul `(let q (^ p))` crée un second alias vivant sur le
+  même emplacement (chaînage à deux sauts). De même, un paramètre reçu par valeur est
+  déréférencé à la lecture ; pour muter la cible depuis une fonction, passer `^` (§6).
+* Une référence stockée dans un composite (champ de struct, élément de tableau) reste vivante
+  pour les lectures : lire le champ / l'élément déréférence la valeur courante. En revanche,
+  ÉCRIRE sur la position terminale qui contient une référence REMPLACE la référence elle-même
+  (sémantique feuille) : `(set box.p 7)` met 7 dans box.p, la cible de l'ancienne référence n'est
+  pas mutée. Une variable détenant une référence, et tout pas intermédiaire d'un chemin, s'écrivent
+  À TRAVERS (write-through) : avec `a[1] = (^ b)`, `(set a[1][2] 9)` mute b.
+* Cycles : assigner une valeur contenant une référence qui pointe — directement ou indirectement,
+  y compris via une chaîne d'alias écrite à travers un appel de fonction — vers un ancêtre de
+  l'emplacement cible crée un cycle ; l'assignation est refusée par TypeError « cyclic reference ».
+* Sérialisation et comparaison : `eq`, `%s`, `%q`, `%x` et `%j` déréférencent et opèrent sur la
+  valeur courante. Une référence devenue invalide rend `null` en position imbriquée de `%s` et
+  `<invalid reference>` dans la stringification racine, tandis que `%x`/`%j` propagent l'erreur
+  de type. `%v` conserve le wrapper `Ref(...)` (référence invalide → `Ref(<invalid>)`), ce qui
+  garde les structures cycliques rendables. `%t` rend `ref` (détails en §14).
 
 8. Arithmétique
 * integer = i64 (signé), float = f64.
@@ -184,7 +224,8 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 * Structs : égalité structurelle profonde, ordre insignifiant (comparaison de map).
 * Fonctions : égalité par identité (même closure physique), deux fn au code identique mais définis séparément → f.
 * Floats : comparaison IEEE 754, sans epsilon : NaN n'est égal à aucune valeur (y compris NaN), les zéros signés sont égaux (`0.0 == -0.0`), et les infinis sont égaux à eux-mêmes.
-* Références : déréférencées avant comparaison (§7).
+* Références : déréférencées avant comparaison (§7). Une référence invalide contenue dans un
+  composite rend la comparaison f, sans erreur : le composite ne peut être égal à aucune valeur.
 * Variadique : `eq` est vrai seulement si tous les arguments sont égaux deux à deux
   (comparaison par paires, pas seulement adjacentes) ; `ne` est la négation exacte de `eq`,
   vrai dès qu'au moins une paire diffère. `(eq)` et `(eq x)` → t ; `(ne)` et `(ne x)` → f.
@@ -250,7 +291,8 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
   suivants sont consommés dans l'ordre par les spécificateurs.
 * `%s` accepte tout type et produit la stringification canonique. Les strings utilisées comme
   valeurs imbriquées dans les arrays et structs sont entourées de guillemets ; les clés de struct
-  ne le sont pas.
+  ne le sont pas. Les références sont déréférencées (§7) ; une référence invalide rend `null` en
+  position imbriquée et `<invalid reference>` à la racine.
 * `%q` exige une string et produit un littéral string Lisp entre guillemets, ré-utilisable par le
   lecteur : `"` → `\"`, `\` → `\\`, saut de ligne → `\n`, retour chariot → `\r`, tabulation →
   `\t` ; tout autre caractère est émis tel quel (le lecteur l'accepte verbatim). Le résultat
@@ -260,7 +302,8 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
   `t`/`f`, `_` devient `_`, les floats utilisent leur représentation numérique (`NaN`, `Inf`,
   `-Inf` inclus), les arrays sont `[a b c]`, les structs `{clé:valeur ...}` dans l'ordre
   d'insertion. Les fonctions n'ont pas de représentation source et sont refusées. Le résultat
-  re-parse comme une valeur égale à l'originale.
+  re-parse comme une valeur égale à l'originale. Les références sont déréférencées (§7) ; une
+  référence invalide propage une erreur de type.
 * `%d` exige un integer et produit son écriture décimale signée.
 * `%b` exige un integer et produit son écriture binaire sans largeur imposée.
 * `%8b`, `%16b`, `%32b` et `%64b` exigent un integer et produisent une écriture binaire
@@ -278,12 +321,16 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
   de struct sont des strings JSON entre guillemets :
   `_` devient `null`, `t`/`f` deviennent `true`/`false`, les structs ont des clés
   entourées de guillemets. Les fonctions ne sont pas sérialisables et les Float `NaN`,
-  `Inf` et `-Inf` sont refusés.
+  `Inf` et `-Inf` sont refusés. Les références sont déréférencées (§7) ; une référence invalide
+  propage une erreur de type.
 * `%t` accepte tout type et produit son nom de type (`null`, `bool`, `int`, `float`, `string`,
   `array`, `struct`, `function` ou `ref`).
 * `%v` accepte tout type et produit sa représentation structurelle de debug (`Array(...)`,
   `Struct(...)`, `Int(...)`, etc.). Les clés de struct suivent la syntaxe Lisp (`name: value`),
-  sans guillemets.
+  sans guillemets. Une référence apparaît comme `Ref(...)`, son contenu étant rendu en
+  déréférençant l'emplacement (référence invalide → `Ref(<invalid>)`) : le wrapper est conservé —
+  contrairement à `%s`/`%q`/`%x`/`%j` — pour que les structures contenant des cycles restent
+  rendables.
 * `%%` produit un caractère `%` littéral et ne consomme aucun argument.
 * `%~` exige deux arguments : une string regex puis une string à matcher. La regex suit la
   forme `[options]~modèle` : les lettres d'options `g`, `m`, `i`, `s`, `x`, `U`, `u`, `R`

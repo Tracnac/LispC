@@ -96,6 +96,37 @@ and `(io.read 0)` keeps reading the original stdin. Without a controlling termin
 raises an IO error instead of falling back to stdin; EOF on the terminal ends the session
 like `:c`.
 
+## Values, aliases, and references
+
+Small Lisp uses value semantics with explicit aliasing. Arrays, structs, and nested composites
+are **immutable snapshots** shared for reads: any read — a variable lookup, `.`/`[...]` access, a
+function argument, a `let` — yields the *current* value and can never mutate it. Mutation only
+ever replaces the value stored in a cell (a variable root), and a rebind is invisible to earlier
+readers.
+
+`^` produces a **reference**: a logical location — the root cell plus a path of field/index
+steps — never a value snapshot. A reference is resolved against the *current* value at each
+read and write:
+
+- `(let a [1 2]) (let p (^ a[1]))` — `p` reads as `1`, and after `(set a[1] 9)` reads as `9`.
+- Rebinding the root re-targets the alias: `(set a [5 6])` makes `(^ a[1])` resolve to `5`, and
+  rebinding with an **incompatible** type (`(set a {x:1})`) fails deterministically on read with
+  a clean type error (`indexing requires an array`) — never a stale value. The same alias resolves
+  again once the location exists.
+- `(let q p)` dereferences and copies the *current* value (fully isolated); only `(let q (^ p))`
+  creates a second live alias (two-hop chains work).
+- References stored *inside* an array/struct stay live for reads, but writing to the final
+  position just **replaces the alias** (`(set box.p 7)` writes 7 into `box.p`). Variables holding
+  a reference — and intermediate path steps — **write through**: with `a[1] = (^ b)`,
+  `(set a[1][2] 9)` mutates `b`.
+- Argument passing is by value (snapshot); `(g ^x)` makes the parameter an alias into the caller.
+- Assigning a value whose refs point at an ancestor of the target location — directly, indirectly,
+  or through a call — creates a cycle and is rejected with `cyclic reference`.
+- `eq` dereferences transparently and compares current values, as do `%s`, `%q`, `%x`, and `%j`
+  (`%s` degrades an invalid ref to `null`/`<invalid reference>`; `%x`/`%j` raise a type error).
+  `%v` keeps the `Ref(...)` wrapper explicit so cyclic structures stay renderable, and `%t` on a
+  reference yields `ref`.
+
 ## File IO
 
 Load the native `io` module with `(use "io")`. `io.open` accepts file URIs whose `mode` query parameter is one of `r`, `r+`, `w`, `w+`, `a`, or `a+`. It returns an integer file descriptor. `io.read` reads one UTF-8 line without its EOL and returns `_` at EOF; `io.write` writes a string and returns its byte count; `io.close` returns `t` when it closes an open descriptor and `f` otherwise.
