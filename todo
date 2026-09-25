@@ -8,35 +8,27 @@ Performance
 Bug
 ===
 
-- No tail calls and no recursion-depth guard. Recursion is marketed in the spec, but deep or infinite recursion overflows the stack and (with panic = "abort" in the release profile, Cargo.toml:17) aborts without any diagnostic. All the other failure modes get nice file:line:col errors; this one kills the process. (was 6)
+- Resolved: no tail calls and no recursion-depth guard — deep or infinite recursion used to
+  overflow the native stack and abort (panic = "abort") with no diagnostic. The evaluator now
+  bounds call depth: MAX_CALL_DEPTH (2048) nested calls; past that, `RecursionError: call depth
+  limit (2048) exceeded …` points at the offending call (file:line:col + caret) and carries the
+  live call chain (innermost 40 frames, then "… N more frame(s) omitted"). The interpreter runs
+  on a thread with a large explicit stack (256 MB, main()) so the guard — not the native stack —
+  is what bounds recursion; 2048 was calibrated against measured frame costs (~28–44 KB per call
+  level in debug builds, ~6 KB in release; the tree-walker is stack-hungry). Recursion near the
+  limit still works; `loop` remains the unbounded iteration form. Residual: `(eval …)`-driven
+  self-nesting, deeply nested data (copy/render), and deep parser nesting have their own native
+  recursion the call guard does not count. (was 6)
+
+- Open: tail-call optimization — tail-recursive functions (and their calls inside if/match/
+  block tails) would run in constant stack, making tail recursion unbounded and widening the
+  usable recursion headroom far beyond the guard. The guard above means this is no longer a
+  crash hazard; it is a performance/expressiveness item. (from the item above)
 
 - Global mutable state duplicated as bookkeeping. Five thread_local! slots including LAST_ERROR_SPAN, which is written on every eval node (src/main.rs:811). That's thread-local borrow traffic on the hot path, and the "last span any node touched" scheme is fragile — an error in a native function points at whatever node happened to evaluate last, not necessarily the failing call. (was 8)
 
 Feature
 =======
-
-- Resolved: `(repl)` builtin — an interactive debugging session that suspends the program at
-  the call site. Lines evaluate in a disposable child scope (`let` stays local, `set` reaches
-  the program); `:c` resumes, `:q` aborts (Error::Quit), errors never propagate, `(break)`/
-  `(continue)` act on the enclosing loop, nested `(repl)` works. Runs on the controlling
-  terminal (/dev/tty), so program stdin stays untouched even when the program is piped in;
-  without a tty it fails with IOError (no stdin fallback). Tests use the REPL_INPUT hook.
-
-- Resolved: REPL debugging commands — `:l`/`:list [N]` (source window ±3 around the execution
-  point, `:l 0` = current line only), `:i`/`:inspect` (effective binding table with shadow
-  `*` marks) and `:i name` (value, type, scope, shadow chain, `def: file:line` for
-  functions), `:bt`/`:backtrace` (live call stack innermost-first with file:line:col). An
-  EVAL_SOURCES thread-local registry (pushed/popped at every evaluation boundary: program
-  file with shebang offset, `(eval …)`, each REPL line) maps spans back to source, enabling
-  the context prompt `file:line> ` / `label@file:line> `. Ctrl-C inside a session cancels
-  the line and stays in the session, restoring the pre-session interrupt state on exit.
-  Tests add the REPL_OUTPUT capture hook and a per-thread REPL_INTERRUPT simulator.
-
-- Resolved: `_` no longer makes arbitrary structs callable, and unwrapping is no longer
-  recursive. Only the full descriptor pair `{_: callable spec: ...}` auto-unboxes in operator
-  position, exactly one level (invoke_operator); `_` chains/cycles cannot loop because a bare
-  `_` field never unwraps and a descriptor `_` slot is validated callable. Residual: `_` is
-  overloaded as null literal, regex-gap glyph, and descriptor function-slot name. (was 9)
 
 - use special-cases the AST shape (let …) instead of evaluating normally. (from 10)
 

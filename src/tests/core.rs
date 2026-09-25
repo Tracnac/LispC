@@ -25,6 +25,78 @@ fn script_with_shebang_still_runs() {
     check(source, "t");
 }
 
+/// Runs `check` on a thread with a large explicit stack, mirroring the real
+/// interpreter (main() runs on a 256 MB thread). The recursion tests must
+/// reach MAX_CALL_DEPTH — far beyond what a 2 MB default test-thread stack
+/// can physically hold — so the guard, not the harness, is what stops them.
+/// The closure returns a Send-able verdict: Err(message) fails the test.
+fn run_deep(check: impl FnOnce() -> Result<(), String> + Send + 'static) {
+    let verdict = thread::Builder::new()
+        .stack_size(INTERPRETER_STACK)
+        .spawn(check)
+        .unwrap()
+        .join()
+        .unwrap();
+    if let Err(message) = verdict {
+        panic!("{message}");
+    }
+}
+
+#[test]
+fn recursion_beyond_the_depth_limit_is_a_clean_error() {
+    run_deep(|| match run("(let boom (fn () (boom))) (boom)") {
+        Err(Error::Recursion(message)) if message.contains(&MAX_CALL_DEPTH.to_string()) => Ok(()),
+        Err(other) => Err(format!(
+            "expected RecursionError mentioning the limit, got: {other}"
+        )),
+        Ok(_) => Err("runaway recursion must not succeed".into()),
+    });
+}
+
+#[test]
+fn recursion_that_stays_within_the_limit_still_works() {
+    // Count down and return: a genuine recursion that reaches the very edge
+    // of the limit without tripping the guard. (`(down N)` deepens to N+1
+    // live frames, so N = limit - 1 lands exactly on the limit.)
+    let program = format!(
+        "(let down (fn (n) (if (eq n 0) t (down (sub n 1))))) (down {})",
+        MAX_CALL_DEPTH - 1
+    );
+    run_deep(move || match run(&program) {
+        Ok(value) if matches!(&value, Value::Bool(true)) => Ok(()),
+        Ok(_) => Err("expected t from the countdown".into()),
+        Err(error) => Err(format!(
+            "recursion within the limit must succeed, got: {error}"
+        )),
+    });
+}
+
+#[test]
+fn recursion_error_diagnostic_carries_the_call_chain() {
+    // The guard's span and call trace live in thread-locals, so the whole
+    // error path must run on the fat thread too (Value is not Send).
+    let source = "(let boom (fn () (boom))) (boom)".to_owned();
+    run_deep(move || {
+        let error = match run(&source) {
+            Err(error) => error,
+            Ok(_) => return Err("expected runtime error".into()),
+        };
+        let span = LAST_ERROR_SPAN.with(|span| *span.borrow());
+        let rendered = diagnostic(&error, &source, "r.lisp", span);
+        let checks = [
+            rendered.contains("RecursionError"),
+            rendered.contains("call trace:"),
+            rendered.contains("boom at r.lisp:1:"),
+            rendered.contains("more frame(s) omitted"),
+        ];
+        if checks.into_iter().all(|ok| ok) {
+            Ok(())
+        } else {
+            Err(format!("unexpected diagnostic was:\n{rendered}"))
+        }
+    });
+}
+
 #[test]
 fn closure_recursion_and_integer_division_work() {
     check(

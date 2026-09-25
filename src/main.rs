@@ -7,6 +7,7 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
+    thread,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -100,6 +101,7 @@ enum Error {
     DuplicateKey(String),
     DuplicateBinding(String),
     Expect(String),
+    Recursion(String),
     Match,
     ContinueOutsideLoop,
     BreakOutside,
@@ -122,6 +124,7 @@ impl fmt::Display for Error {
             DuplicateKey(s) => write!(f, "DuplicateKeyError: {s}"),
             DuplicateBinding(s) => write!(f, "DuplicateBindingError: {s}"),
             Expect(s) => write!(f, "ExpectationError: {s}"),
+            Recursion(s) => write!(f, "RecursionError: {s}"),
             Match => write!(f, "MatchError: no predicate matched"),
             ContinueOutsideLoop => write!(f, "ContinueOutsideLoop"),
             BreakOutside => write!(f, "BreakOutsideLoop"),
@@ -136,6 +139,20 @@ enum Flow {
     Break(Value),
     Continue,
 }
+
+/// The maximum number of nested Lisp function calls before the recursion
+/// guard trips. This is a tree-walking interpreter: every Lisp call nests a
+/// chain of native eval/call/invoke frames — tens of KB of native stack per
+/// level in debug builds (measured: ~28 KB lean, ~44 KB for bodies with
+/// several nested forms). `MAX_CALL_DEPTH` levels therefore need on the
+/// order of 100 MB of native stack, so the interpreter runs on a thread
+/// with a large explicit stack (INTERPRETER_STACK below). Passing the guard
+/// is a normal RecursionError (with the call site and live call chain), not
+/// a stack-overflow abort. See spec.txt §fn and main().
+const MAX_CALL_DEPTH: usize = 2048;
+/// Native stack reserved for the interpreter thread (see MAX_CALL_DEPTH and
+/// main()). Only the pages actually touched are committed.
+const INTERPRETER_STACK: usize = 256 * 1024 * 1024;
 
 thread_local! {
     static PARSE_ERROR_SPAN: RefCell<Option<Span>> = const { RefCell::new(None) };
@@ -2140,6 +2157,23 @@ fn invoke(f: Value, vals: Vec<Value>, call_span: Span) -> EResult {
         .clone()
         .unwrap_or_else(|| "<anonymous function>".into());
     CALL_TRACE.with(|trace| trace.borrow_mut().push((name, call_span)));
+    if CALL_TRACE.with(|trace| trace.borrow().len()) > MAX_CALL_DEPTH {
+        // Deep or runaway recursion: trip the guard while the native stack
+        // still has room, so the program gets the usual file:line:col error
+        // (pointing at this call) plus the live call chain — instead of an
+        // abort with no diagnostic. The span and trace below mirror what
+        // invoke's own error handling would record for a body error.
+        LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
+        CALL_TRACE.with(|trace| {
+            let trace = trace.borrow();
+            LAST_TRACE.with(|last| *last.borrow_mut() = trace.clone());
+        });
+        CALL_TRACE.with(|trace| trace.borrow_mut().pop());
+        return Err(Error::Recursion(format!(
+            "call depth limit ({MAX_CALL_DEPTH}) exceeded — is this function recursing without a base case?"
+        ))
+        .into());
+    }
     let result = eval(&f.body, &e, 0, 0);
     if result.is_err() {
         CALL_TRACE.with(|trace| {
@@ -2927,7 +2961,11 @@ fn diagnostic(error: &Error, source: &str, file: &str, span: Option<Span>) -> St
     let trace = LAST_TRACE.with(|last| last.borrow().clone());
     if !trace.is_empty() {
         out.push_str("\ncall trace:");
-        for (name, frame) in trace.iter().rev() {
+        // Innermost frames first; cap the listing so a deep recursion error
+        // does not dump the whole (potentially MAX_CALL_DEPTH-long) chain.
+        let frames: Vec<&(String, Span)> = trace.iter().rev().collect();
+        let shown = frames.len().min(40);
+        for (name, frame) in frames.iter().take(shown) {
             let line = source[..frame.start.min(source.len())]
                 .bytes()
                 .filter(|b| *b == b'\n')
@@ -2942,6 +2980,12 @@ fn diagnostic(error: &Error, source: &str, file: &str, span: Option<Span>) -> St
                 + 1;
             out.push_str(&format!("\n  {name} at {file}:{line}:{column}"));
         }
+        if frames.len() > shown {
+            out.push_str(&format!(
+                "\n  … {} more frame(s) omitted",
+                frames.len() - shown
+            ));
+        }
     }
     out
 }
@@ -2952,61 +2996,84 @@ fn strip_shebang(source: &str) -> &str {
     }
 }
 fn main() {
-    if let Err(error) = install_sigint_handler() {
-        let _ = writeln!(io::stderr(), "{error}");
-        std::process::exit(1);
-    }
-    let args: Vec<String> = env::args().collect();
-    let file = args.get(1).map_or("<stdin>", String::as_str);
-    let src = if args.len() > 1 {
-        fs::read_to_string(&args[1]).map_err(|e| Error::Io(e.to_string()))
-    } else {
-        let mut s = String::new();
-        io::stdin()
-            .read_to_string(&mut s)
-            .map(|_| s)
-            .map_err(|e| Error::Io(e.to_string()))
-    };
-    // The REPL's :l/:i/:bt report file-accurate line numbers, so record how
-    // many leading lines (a shebang) were stripped before parsing.
-    let stripped_lines = if matches!(&src, Ok(s) if s.starts_with("#!")) {
-        1
-    } else {
-        0
-    };
-    let src = src.map(|source| strip_shebang(&source).to_owned());
-    let result = (|| -> Result<(), (Error, bool)> {
-        let source = src.clone().map_err(|e| (e, false))?;
-        let ts = lex(&source).map_err(|e| (e, true))?;
-        let p = Parser { ts, i: 0 }.program().map_err(|e| (e, true))?;
-        let e = new_env(None);
-        push_source(SourceCtx {
-            label: file.to_owned(),
-            source: source.clone(),
-            line_offset: stripped_lines,
-        });
-        let outcome = (|| {
-            for x in p {
-                eval(&x, &e, 0, 0).map_err(|e| (flow_err(e), false))?;
+    // The interpreter runs on a dedicated thread with a large explicit stack
+    // (see MAX_CALL_DEPTH); propagate its exit code.
+    std::process::exit(interpreter_main());
+}
+
+/// Runs the interpreter to completion and returns the process exit code.
+///
+/// The interpreter is a deep tree-walking evaluator: every Lisp call nests a
+/// chain of native frames (tens of KB per level in debug builds), so
+/// MAX_CALL_DEPTH levels of recursion need ~100 MB of native stack before
+/// the recursion guard trips. A regular main-thread stack (8 MB) would run
+/// out long before the guard — aborting with no diagnostic — so the whole
+/// interpreter runs on a thread with an explicit, generous stack.
+fn interpreter_main() -> i32 {
+    let handle = thread::Builder::new()
+        .name("small-lisp".into())
+        .stack_size(INTERPRETER_STACK)
+        .spawn(|| {
+            if let Err(error) = install_sigint_handler() {
+                let _ = writeln!(io::stderr(), "{error}");
+                return 1;
             }
-            Ok(())
-        })();
-        pop_source();
-        outcome
-    })();
-    if let Err((e, parse)) = result {
-        let source = match &src {
-            Ok(source) => source,
-            Err(_) => "",
-        };
-        let span = if parse {
-            PARSE_ERROR_SPAN.with(|span| *span.borrow())
-        } else {
-            LAST_ERROR_SPAN.with(|span| *span.borrow())
-        };
-        let _ = writeln!(io::stderr(), "{}", diagnostic(&e, source, file, span));
-        std::process::exit(1)
-    }
+            let args: Vec<String> = env::args().collect();
+            let file = args.get(1).map_or("<stdin>", String::as_str);
+            let src = if args.len() > 1 {
+                fs::read_to_string(&args[1]).map_err(|e| Error::Io(e.to_string()))
+            } else {
+                let mut s = String::new();
+                io::stdin()
+                    .read_to_string(&mut s)
+                    .map(|_| s)
+                    .map_err(|e| Error::Io(e.to_string()))
+            };
+            // The REPL's :l/:i/:bt report file-accurate line numbers, so
+            // record how many leading lines (a shebang) were stripped before
+            // parsing.
+            let stripped_lines = if matches!(&src, Ok(s) if s.starts_with("#!")) {
+                1
+            } else {
+                0
+            };
+            let src = src.map(|source| strip_shebang(&source).to_owned());
+            let result = (|| -> Result<(), (Error, bool)> {
+                let source = src.clone().map_err(|e| (e, false))?;
+                let ts = lex(&source).map_err(|e| (e, true))?;
+                let p = Parser { ts, i: 0 }.program().map_err(|e| (e, true))?;
+                let e = new_env(None);
+                push_source(SourceCtx {
+                    label: file.to_owned(),
+                    source: source.clone(),
+                    line_offset: stripped_lines,
+                });
+                let outcome = (|| {
+                    for x in p {
+                        eval(&x, &e, 0, 0).map_err(|e| (flow_err(e), false))?;
+                    }
+                    Ok(())
+                })();
+                pop_source();
+                outcome
+            })();
+            if let Err((e, parse)) = result {
+                let source = match &src {
+                    Ok(source) => source,
+                    Err(_) => "",
+                };
+                let span = if parse {
+                    PARSE_ERROR_SPAN.with(|span| *span.borrow())
+                } else {
+                    LAST_ERROR_SPAN.with(|span| *span.borrow())
+                };
+                let _ = writeln!(io::stderr(), "{}", diagnostic(&e, source, file, span));
+                return 1;
+            }
+            0
+        })
+        .expect("failed to spawn the interpreter thread");
+    handle.join().unwrap_or(101)
 }
 
 #[cfg(test)]

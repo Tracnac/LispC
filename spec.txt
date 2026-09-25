@@ -121,6 +121,14 @@ postfix-access := field-access ("[" selector "]")*
 * Il n'y a pas de currying automatique.
 * Passage d'argument par valeur par défaut (copie). Passer ^x fait de l'argument un alias de x : un set dans le corps de la fonction mute la variable de l'appelant.
 * Récursion native : le corps d'un fn n'est évalué qu'à l'appel, et la closure référence son environnement par pointeur, pas besoin de letrec.
+* Profondeur d'appel bornée : la récursion est limitée à 2048 appels imbriqués (`MAX_CALL_DEPTH`).
+  Au-delà, l'évaluateur lève `RecursionError: call depth limit (2048) exceeded …` — une erreur de
+  langage ordinaire, positionnée sur l'appel fautif (`fichier:ligne:col` + caret) et accompagnée
+  de la pile d'appel vivante (les 40 cadres les plus internes puis « … N more frame(s) omitted »),
+  jamais un crash silencieux. L'interpréteur tourne sur un thread à grande pile explicite
+  (256 Mo, voir main()) pour que la garde — et non la pile native — borne la récursion ; la
+  valeur 2048 est calibrée sur la consommation mesurée (des dizaines de Ko de pile native par
+  appel en build debug). Pour une itération sans borne de profondeur, utiliser `loop`.
 
 (let incr (fn (n) (set n (add n 1))))
 (let x 5)

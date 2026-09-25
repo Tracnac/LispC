@@ -30,7 +30,9 @@ Scripts may start with a `#!` shebang line, so they can be executed directly aft
 
 Small Lisp includes:
 
-- lexical scopes, mutable closures, recursion, and explicit aliases (`^name`)
+- lexical scopes, mutable closures, recursion (bounded: exceeding the call-depth limit is a
+  clean `RecursionError` with file:line:col and the call trace, never a stack crash), and
+  explicit aliases (`^name`)
 - heterogeneous arrays and insertion-ordered structs
 - checked integer arithmetic and integer bitwise operations
 - fixed-arity user functions and variadic numeric folds
