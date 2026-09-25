@@ -88,12 +88,12 @@ fn file_descriptor_io_reads_lines_and_tracks_close_status() {
     let source = format!(
         r#"
                 (use "io")
-                (let #fd (io.open "file:{}?mode=w"))
-                (io.write #fd "first\nsecond")
-                (io.close #fd)
-                (set #fd (io.open "file:{}?mode=r"))
-                (let first (io.read #fd))
-                (io.close #fd)
+                (let fd (io.open "file:{}?mode=w"))
+                (io.write fd "first\nsecond")
+                (io.close fd)
+                (set fd (io.open "file:{}?mode=r"))
+                (let first (io.read fd))
+                (io.close fd)
                 first
             "#,
         path.display(),
@@ -105,9 +105,9 @@ fn file_descriptor_io_reads_lines_and_tracks_close_status() {
     let close_status = run(&format!(
         r#"
                 (use "io")
-                (let #fd (io.open "file:{}?mode=r"))
-                (io.close #fd)
-                (io.close #fd)
+                (let fd (io.open "file:{}?mode=r"))
+                (io.close fd)
+                (io.close fd)
             "#,
         path.display(),
     ))
@@ -137,13 +137,13 @@ fn file_open_modes_have_their_declared_semantics() {
     let path = path.display().to_string();
 
     let value = run(&format!(
-        r#"(use "io") (let #fd (io.open "file:{path}?mode=r")) (let line (io.read #fd)) (io.close #fd) line"#
+        r#"(use "io") (let fd (io.open "file:{path}?mode=r")) (let line (io.read fd)) (io.close fd) line"#
     ))
     .unwrap();
     assert!(matches!(value, Value::Str(line) if line == "initial"));
 
     let value = run(&format!(
-        r#"(use "io") (let #fd (io.open "file:{path}?mode=w")) (io.close #fd)"#
+        r#"(use "io") (let fd (io.open "file:{path}?mode=w")) (io.close fd)"#
     ))
     .unwrap();
     assert!(matches!(value, Value::Bool(true)));
@@ -158,7 +158,7 @@ fn file_open_modes_have_their_declared_semantics() {
     ] {
         fs::write(&path, "initial").unwrap();
         run(&format!(
-            r#"(use "io") (let #fd (io.open "file:{path}?mode={mode}")) (io.write #fd "{text}") (io.close #fd)"#
+            r#"(use "io") (let fd (io.open "file:{path}?mode={mode}")) (io.write fd "{text}") (io.close fd)"#
         ))
         .unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), expected, "mode {mode}");
@@ -225,13 +225,13 @@ fn io_read_is_buffered_across_repeated_calls_and_multiple_lines() {
     let source = format!(
         r#"
             (use "io")
-            (let #fd (io.open "file:{}?mode=r"))
-            (let a (io.read #fd))
-            (let b (io.read #fd))
-            (let c (io.read #fd))
-            (let d (io.read #fd))
-            (let e (io.read #fd))
-            (io.close #fd)
+            (let fd (io.open "file:{}?mode=r"))
+            (let a (io.read fd))
+            (let b (io.read fd))
+            (let c (io.read fd))
+            (let d (io.read fd))
+            (let e (io.read fd))
+            (io.close fd)
             [a b c d e]
         "#,
         path.display(),
@@ -251,10 +251,10 @@ fn read_write_mode_r_plus_reads_then_writes_through_one_handle() {
     fs::write(&path, "initial").unwrap();
     let source = format!(
         r#"(use "io")
-            (let #fd (io.open "file:{}?mode=r+"))
-            (let line (io.read #fd))
-            (io.write #fd "!")
-            (io.close #fd)
+            (let fd (io.open "file:{}?mode=r+"))
+            (let line (io.read fd))
+            (io.write fd "!")
+            (io.close fd)
             line"#,
         path.display(),
     );
@@ -272,11 +272,11 @@ fn read_write_mode_w_plus_truncates_and_reads_at_the_stream_position() {
     fs::write(&path, "old").unwrap();
     let source = format!(
         r#"(use "io")
-            (let #fd (io.open "file:{}?mode=w+"))
-            (let before (io.read #fd))
-            (io.write #fd "one\ntwo\n")
-            (let after (io.read #fd))
-            (io.close #fd)
+            (let fd (io.open "file:{}?mode=w+"))
+            (let before (io.read fd))
+            (io.write fd "one\ntwo\n")
+            (let after (io.read fd))
+            (io.close fd)
             [before after]"#,
         path.display(),
     );
@@ -294,11 +294,11 @@ fn read_write_mode_a_plus_reads_from_the_start_and_appends() {
     fs::write(&path, "one\ntwo\n").unwrap();
     let source = format!(
         r#"(use "io")
-            (let #fd (io.open "file:{}?mode=a+"))
-            (let a (io.read #fd))
-            (let b (io.read #fd))
-            (io.write #fd "X")
-            (io.close #fd)
+            (let fd (io.open "file:{}?mode=a+"))
+            (let a (io.read fd))
+            (let b (io.read fd))
+            (io.write fd "X")
+            (io.close fd)
             [a b]"#,
         path.display(),
     );
@@ -315,11 +315,11 @@ fn io_read_strips_crlf_and_lone_lf_terminators() {
     fs::write(&path, "one\r\ntwo\nthree\r\n").unwrap();
     let source = format!(
         r#"(use "io")
-            (let #fd (io.open "file:{}?mode=r"))
-            (let a (io.read #fd))
-            (let b (io.read #fd))
-            (let c (io.read #fd))
-            (let d (io.read #fd))
+            (let fd (io.open "file:{}?mode=r"))
+            (let a (io.read fd))
+            (let b (io.read fd))
+            (let c (io.read fd))
+            (let d (io.read fd))
             [a b c d]"#,
         path.display(),
     );
@@ -336,7 +336,7 @@ fn io_read_rejects_invalid_utf8() {
     let path = env::temp_dir().join(format!("small_lisp_io_utf8_{}.txt", std::process::id()));
     fs::write(&path, b"ok\n\xff\xfe\n").unwrap();
     let source = format!(
-        r#"(use "io") (let #fd (io.open "file:{}?mode=r")) (io.read #fd) (io.read #fd)"#,
+        r#"(use "io") (let fd (io.open "file:{}?mode=r")) (io.read fd) (io.read fd)"#,
         path.display(),
     );
     // The first line reads fine; the second line is not valid UTF-8.
@@ -372,14 +372,14 @@ fn io_read_and_write_reject_invalid_and_incapable_descriptors() {
     // A write-only handle cannot be read; a read-only handle cannot be written.
     assert!(matches!(
         run(&format!(
-            r#"(use "io") (let #fd (io.open "file:{}?mode=w")) (io.read #fd)"#,
+            r#"(use "io") (let fd (io.open "file:{}?mode=w")) (io.read fd)"#,
             path.display()
         )),
         Err(Error::Io(message)) if message.contains("is not readable")
     ));
     assert!(matches!(
         run(&format!(
-            r#"(use "io") (let #fd (io.open "file:{}?mode=r")) (io.write #fd "x")"#,
+            r#"(use "io") (let fd (io.open "file:{}?mode=r")) (io.write fd "x")"#,
             path.display()
         )),
         Err(Error::Io(message)) if message.contains("is not writable")

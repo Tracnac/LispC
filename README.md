@@ -3,27 +3,13 @@
 A small tree-walking Lisp interpreter written in Rust. It provides lexical scopes, mutable
 closures, arrays, structs, Unicode-aware strings, regex captures, HTTP, and file-descriptor IO.
 
-The language is documented in [`spec.txt`](spec.txt). Runnable examples are in
-[`examples/`](examples/).
+The language is documented in [`spec.txt`](spec.txt).
 
 ## Requirements
 
 - Rust and Cargo (stable toolchain)
 
-## Quick start
-
-```sh
-cargo test
-cargo run -- examples/smoke.lisp
-cargo run -- examples/onboarding.lisp
-```
-
-Build an optimized executable with:
-
-```sh
-cargo build --release
-./target/release/small-lisp examples/smoke.lisp
-```
+## Quickstart
 
 The executable accepts a source-file path. Without a path, it reads the complete program from
 standard input until EOF:
@@ -54,49 +40,13 @@ Small Lisp includes:
 - UTF-8 strings indexed by Unicode grapheme clusters
 - regular-expression matching with capture arrays
 - synchronous HTTP requests and file-descriptor IO
-
-Native modules are loaded with `use`. The initial registry provides `str`, whose functions use
-the same descriptor representation as Lisp-defined callable fields:
-
-```lisp
-(use "str")
-(str.upper "hello") ; "HELLO"
-(str.lower "HELLO") ; "hello"
-($ "%s" str.upper.spec.documentation)
-```
-
-Function arity belongs to each callable. User-defined functions are fixed-arity, while
-`add`, `mul`, `sub`, `div`, comparisons, and the three bitwise folds are variadic. There is no
-automatic currying.
-
-```lisp
-(add)             ; 0
-(add 1 2 3 4)     ; 10
-(mul 2 3 4)       ; 24
-(sub 10 3 2)      ; 5
-(div 20 2 2)      ; 5
-(bit-or 1 2 4)    ; 7
-```
+- Native modules are loaded with `use`.
 
 ### Arrays and strings
 
 Array indexes are 1-based and support negative indexes. Ranges are inclusive and may omit either
 bound. String positions follow the same rules, but count Unicode grapheme clusters rather than
 bytes or Unicode scalar values.
-
-```lisp
-(let values [10 20 30 40 50])
-values[1]       ; 10
-values[-1]      ; 50
-values[2..4]    ; [20 30 40]
-
-(let text "😀abc")
-text[1]         ; "😀"
-text[1..2]      ; "😀a"
-text[[1 3]]    ; ["😀" "b"]
-```
-
-Single string indexes and ranges return strings. Multi-index selectors return arrays of strings.
 
 ### Regex captures
 
@@ -105,29 +55,11 @@ Single string indexes and ranges return strings. Multi-index selectors return ar
 the capture groups, and binds that array to the supplied identifier. An unmatched optional group
 is represented by `_`. On failure it returns `f` and leaves an existing binding unchanged.
 
-```lisp
-(let string "Hello the world")
-(~ "^Hello(.*)$" string caps)
-; ["Hello the world" " the world"]
-
-(let caps ["unchanged"])
-(~ "^Goodbye" string caps)
-; f; caps is still ["unchanged"]
-```
-
 ### Runtime eval
 
 `eval` parses a string as a program and runs it in the caller's environment, returning the last
 form's value — so it can name variables, execute inline code, or run source stored in a variable.
 Control flow (`break`/`continue`) propagates out of the evaluated code.
-
-```lisp
-(let x 42)
-(eval "x")            ; 42, look up a variable
-(eval "(add x 1)")    ; 43, inline code sees the caller's bindings
-(let code "(mul 2 3)")
-(eval code)           ; 6
-```
 
 ## File IO
 
@@ -141,14 +73,7 @@ only; in `r+`, `w+`, and `a+` the descriptor is both readable and writable, and 
 write lands at the current stream position while in `a+` it appends to the end of the file.
 `io.read` on a write-only descriptor, on `stdout`, or on `stderr` produces an IO
 error (e.g. `file descriptor 1 is not readable`); `io.write` on a read-only descriptor or on
-`stdin` produces an IO error. Bind descriptors with a `#`-prefixed name and use that name with `io.read`, `io.write`, and `io.close`.
-
-```lisp
-(use "io")
-(let fd (io.open "file:greeting.txt?mode=w"))
-(io.write fd ($ "Hello, %s\\n" "world"))
-(io.close fd)
-```
+`stdin` produces an IO error.
 
 ## HTTP
 
@@ -167,15 +92,9 @@ normal Lisp errors.
 
 ## Formatting and assertions
 
-`$` supports `%s` (rendered value), `%q` (string as a parseable Lisp literal), `%x` (any value as parseable Lisp source), `%d` (decimal integer), `%b` (binary integer), `%8b`, `%16b`, `%32b`, and `%64b` (fixed-width binary integers), `%h` (lowercase hexadecimal integer), `%o` (octal integer), `%f` (number), `%j` (JSON), `%t` (value type), `%v` (structural debug output), and `%%` (a literal percent sign). Fixed-width binary forms render the low bits of the integer, including two's-complement representations for negative integers.
+`$` supports `%s` (rendered value), `%q` (string as a parseable Lisp literal), `%x` (any value as parseable Lisp source), `%d` (decimal integer), `%b` (binary integer), `%8b`, `%16b`, `%32b`, and `%64b` (fixed-width binary integers), `%h` (lowercase hexadecimal integer), `%8h`, `%16h`, `%32h`, and `%64h` (fixed-width hexadecimal integers), `%o` (octal integer), `%f` (number), `%j` (JSON), `%t` (value type), `%v` (structural debug output), and `%%` (a literal percent sign). Fixed-width binary forms render the low bits of the integer, including two's-complement representations for negative integers.
 
 `expect` checks that its first expression equals its second expression and returns `t`. An optional final string describes the assertion when it fails.
-
-```lisp
-(expect (add 1 1) 2 "addition works")
-```
-
-`examples/onboarding.lisp` is a small interactive program showing those pieces working together. It reads a name from standard input, validates it, mutates a profile through an alias, and performs a countdown.
 
 ## License
 

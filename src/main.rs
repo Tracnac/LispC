@@ -229,7 +229,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
             i += 1;
             continue;
         }
-        if matches!(c, '<' | '>' | '$' | '~') {
+        if matches!(c, '$' | '~') {
             out.push(Tok {
                 kind: TokKind::Symbol(c.to_string()),
                 span: Span {
@@ -314,7 +314,10 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
             i = start;
         }
         let start = i;
-        while i < cs.len() && !cs[i].is_whitespace() && !"()[]{}:,.^\"';".contains(cs[i]) {
+        while i < cs.len()
+            && !cs[i].is_whitespace()
+            && !"()[]{}:,.^\"';#".contains(cs[i])
+        {
             i += 1
         }
         if start == i {
@@ -638,6 +641,11 @@ fn lookup(env: &EnvRef, n: &str) -> Option<Cell> {
     e.parent.clone().and_then(|p| lookup(&p, n))
 }
 fn bind_value(name: &str, value: Value, env: &EnvRef) -> Result<(), Error> {
+    if !is_valid_identity(name) {
+        return Err(Error::Type(format!(
+            "invalid binding name `{name}`: allowed characters are [A-Za-z0-9_-] (ASCII), §2"
+        )));
+    }
     if let Some(cell) = lookup(env, name) {
         let cell = follow(cell)?;
         if value_references_cell(&value, &cell) {
@@ -1053,6 +1061,16 @@ const RESERVED_NAMES: &[&str] = &[
 
 fn is_reserved_name(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
+}
+
+/// §2 : un identifiant est ASCII uniquement et ne contient que des caractères
+/// de la classe `[A-Za-z0-9_-]`. Tout caractère hors de cette classe (comme
+/// `#`) est interdit dans un nom de liaison.
+fn is_valid_identity(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn define_let(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<(String, Value), Flow> {
