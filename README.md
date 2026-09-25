@@ -63,6 +63,25 @@ grapheme-based and returns the whole cluster.
 form's value — so it can name variables, execute inline code, or run source stored in a variable.
 Control flow (`break`/`continue`) propagates out of the evaluated code.
 
+### Debugging REPL
+
+`repl` pauses the running program at the exact point of the call and drops into an interactive
+session with full access to the live state:
+
+```lisp
+(let port 8080)
+(io.write 1 "about to listen…\n")
+(repl "debug")
+(io.write 1 ($ "listening on %d\n" port))
+```
+
+Every line is evaluated as Lisp in a throwaway child scope: `set` mutates program variables,
+`let` binds only inside the session, and the last non-null result is echoed. Commands —
+`:c`/`:continue` resumes the program, `:q`/`:quit` aborts it, `:h`/`:help` lists commands.
+Errors inside a line are reported without stopping the program, `(break)`/`(continue)` act on
+the enclosing loop, and nested `(repl)` sessions work. Lines are read from stdin, so run the
+program from a file; EOF ends the session like `:c`.
+
 ## File IO
 
 Load the native `io` module with `(use "io")`. `io.open` accepts file URIs whose `mode` query parameter is one of `r`, `r+`, `w`, `w+`, `a`, or `a+`. It returns an integer file descriptor. `io.read` reads one UTF-8 line without its EOL and returns `_` at EOF; `io.write` writes a string and returns its byte count; `io.close` returns `t` when it closes an open descriptor and `f` otherwise.

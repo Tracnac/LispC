@@ -15,6 +15,12 @@ Bug
 Feature
 =======
 
+- Resolved: `(repl)` builtin — an interactive debugging session that suspends the program at
+  the call site. Lines evaluate in a disposable child scope (`let` stays local, `set` reaches
+  the program); `:c` resumes, `:q` aborts (Error::Quit), errors never propagate, `(break)`/
+  `(continue)` act on the enclosing loop, nested `(repl)` works. Stdin-fed; the program must
+  run from a file to leave input for the session. Tested via the REPL_INPUT thread-local hook.
+
 - Resolved: `_` no longer makes arbitrary structs callable, and unwrapping is no longer
   recursive. Only the full descriptor pair `{_: callable spec: ...}` auto-unboxes in operator
   position, exactly one level (invoke_operator); `_` chains/cycles cannot loop because a bare

@@ -70,5 +70,6 @@ mod errors;
 mod http;
 mod io;
 mod modules;
+mod repl;
 mod strings;
 mod types;

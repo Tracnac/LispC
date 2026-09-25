@@ -30,9 +30,9 @@ Les symboles `t`, `f`, `_`, `NaN`, `+NaN`, `Inf`, `+Inf` et `-Inf` sont des litt
 * Le lexer ne produit pas de token spécial pour les mots-clés : ils sont lexés comme des
   symboles puis reconnus lorsqu'ils apparaissent en tête d'un appel.
 * Les formes spéciales sont : `let`, `set`, `if`, `fn`, `loop`, `break`, `continue`, `match`,
-  `and`, `or`, `not`, `expect`, `use` et `eval`. Elles contrôlent l'évaluation de leurs arguments ;
-  leurs arguments ne sont donc pas nécessairement tous évalués avant l'appel. `eval` est décrit
-  en §16.
+  `and`, `or`, `not`, `expect`, `use`, `eval` et `repl`. Elles contrôlent l'évaluation de leurs
+  arguments ; leurs arguments ne sont donc pas nécessairement tous évalués avant l'appel. `eval`
+  est décrit en §16, `repl` en §20.
 * Les builtins stricts sont : `add`, `sub`, `mul`, `div`, `mod`, `pow`, `eq`, `ne`, `lt`, `gt`,
   `le`, `ge`, `bit-and`, `bit-or`, `bit-xor`, `bit-not`, `bit-shl` et `bit-shr`. Leurs
   arguments sont évalués puis l'opération est appliquée selon les règles d'arité de §6 et de
@@ -337,7 +337,7 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 17. Erreurs
 Catégories : ParseError, NameError, TypeError, ArityError, MathError (div/0, overflow), IOError,
 HTTPError, FormatError, InvalidRegex, DuplicateKeyError, DuplicateBindingError, MatchError, ContinueOutsideLoop,
-BreakOutsideLoop et Interrupted.
+BreakOutsideLoop, Interrupted et Quit.
 Les erreurs de formatage conservent les sous-messages `FormatArityError` et `FormatTypeError`.
 Pas de try/catch dans la spec → fail-fast : la première erreur stoppe le programme, message sur stderr, exit code non nul.
 Les erreurs de parsing et d'exécution affichent le fichier, la ligne, la colonne, la ligne source
@@ -349,9 +349,32 @@ Sur Unix, Ctrl-C est converti en `Interrupted` et pointe vers l'expression en co
 * Ordre d'insertion préservé.
 * Clés dupliquées à la construction → DuplicateKeyError (pas de "dernier gagne" silencieux).
 * Clés identifiants uniquement, sans guillemets.
-* En position opérateur d'un appel, un struct qui contient le champ `_` est automatiquement
-  déballé vers la valeur de ce champ puis appelé. Les autres évaluations, notamment l'accès
-  de champ et l'interpolation, conservent le struct complet.
+* En position opérateur d'un appel, seul un descripteur complet (`_` + `spec`) est appelable :
+  l'appel déroule la valeur de `_` (validée appelable) en exactement un niveau (détails en §2).
+  Les autres évaluations, notamment l'accès de champ et l'interpolation, conservent le struct
+  complet.
 
 19. Implémentation
 Interpréteur tree-walking en Rust (parse → AST → eval récursif).
+
+20. REPL intégré
+* `(repl)` est une forme spéciale qui suspend le programme à l'endroit exact de l'appel et ouvre
+  une session interactive : chaque ligne est évaluée comme un programme Lisp dans un scope
+  enfant jetable, avec les mêmes profondeurs loop/match que l'appel.
+* `(repl "label")` fixe l'invite (`label> ` au lieu de `repl> `).
+* Lignes : tout ce qui ne commence pas par `:` est évalué ; le résultat de la dernière forme
+  (s'il n'est pas `_`) est affiché sur stdout au format lisp.
+* Commandes (`:` en tête) : `:c`/`:continue` reprend le programme, `:q`/`:quit` l'abandonne
+  (erreur `Quit`, seul cas où la session stoppe le programme), `:h`/`:help` liste les commandes.
+  EOF sur l'entrée quitte la session comme `:c`.
+* Scope enfant : `let` ne lie que dans la session (aucune trace après `:c`) ; `set` et les
+  lectures atteignent l'état vivant du programme. Les erreurs d'une ligne sont affichées
+  (fichier `<repl>`, ligne 1, colonne pointée) et la session continue : elles ne se propagent
+  jamais au programme. `(break)`/`(continue)` tapés dans la session se propagent et agissent
+  sur la boucle englobante. Un `(repl)` imbriqué fonctionne (récursif) et son `:q` abandonne
+  tout le run.
+* L'entrée de la session est le stdin du processus : après `:c`, le programme continue de lire
+  stdin à la suite des lignes déjà consommées par la session. En pratique, la session est
+  utilisable quand le programme est chargé depuis un fichier (s'il vient de stdin, le flux est
+  déjà épuisé).
+* Ctrl-C reste intercepté : `Interrupted` abandonne le run, y compris pendant une session.

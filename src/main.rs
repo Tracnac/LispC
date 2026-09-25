@@ -1,7 +1,7 @@
 use regex::{Regex, RegexBuilder};
 use std::{
     cell::RefCell,
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     env, fmt,
     fs::{self},
     io::{self, Read, Write},
@@ -104,6 +104,7 @@ enum Error {
     ContinueOutsideLoop,
     BreakOutside,
     Interrupted,
+    Quit(String),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -125,6 +126,7 @@ impl fmt::Display for Error {
             ContinueOutsideLoop => write!(f, "ContinueOutsideLoop"),
             BreakOutside => write!(f, "BreakOutsideLoop"),
             Interrupted => write!(f, "Interrupted"),
+            Quit(s) => write!(f, "Quit: {s}"),
         }
     }
 }
@@ -140,6 +142,8 @@ thread_local! {
     static CALL_TRACE: RefCell<Vec<(String, Span)>> = const { RefCell::new(Vec::new()) };
     static LAST_TRACE: RefCell<Vec<(String, Span)>> = const { RefCell::new(Vec::new()) };
     static LAST_ERROR_SPAN: RefCell<Option<Span>> = const { RefCell::new(None) };
+    // Test hook: when set, REPL lines are taken from this queue instead of stdin.
+    static REPL_INPUT: RefCell<Option<VecDeque<String>>> = const { RefCell::new(None) };
 }
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -1044,7 +1048,7 @@ fn need(args: &[Expr], n: usize, name: &str) -> Result<(), Flow> {
 const RESERVED_NAMES: &[&str] = &[
     "let", "set", "if", "fn", "loop", "break", "continue", "match", "and", "or", "not", "expect",
     "use", "eval", "$", "add", "sub", "mul", "div", "mod", "pow", "eq", "ne", "lt", "gt", "le",
-    "ge", "bit-and", "bit-or", "bit-xor", "bit-not", "bit-shl", "bit-shr",
+    "ge", "bit-and", "bit-or", "bit-xor", "bit-not", "bit-shl", "bit-shr", "repl",
 ];
 
 fn is_reserved_name(name: &str) -> bool {
@@ -1082,6 +1086,112 @@ fn define_let(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<(String
         .push((name.clone(), Rc::new(RefCell::new(value.clone()))));
     Ok((name, value))
 }
+
+fn repl_line_source() -> Option<String> {
+    REPL_INPUT.with(|queue| {
+        let mut guard = queue.borrow_mut();
+        if let Some(lines) = guard.as_mut() {
+            return lines.pop_front();
+        }
+        let mut line = String::new();
+        match io::stdin().read_line(&mut line) {
+            Ok(0) | Err(_) => None,
+            Ok(_) => Some(line),
+        }
+    })
+}
+fn repl_echo(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Function(_) => "<fn>".into(),
+        Value::NativeFunction(_) => "<native fn>".into(),
+        other => lisp_source(other).unwrap_or_else(|_| debug_render(other)),
+    }
+}
+fn repl_diagnostic(error: &Error, line: &str, span: Option<Span>) -> String {
+    let span = span.unwrap_or(Span { start: 0, end: 0 });
+    let offset = span.start.min(line.len());
+    let column = line[..offset].chars().count() + 1;
+    let caret = format!("{}^", " ".repeat(column.saturating_sub(1)));
+    format!("<repl>:1:{column}: {error}\n{line}\n{caret}")
+}
+fn eval_repl_line(source: &str, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResult {
+    let tokens = lex(source)?;
+    let program = Parser { ts: tokens, i: 0 }.program()?;
+    let mut result = Value::Null;
+    for form in program {
+        result = eval(&form, env, loop_depth, match_depth)?;
+    }
+    Ok(result)
+}
+fn run_repl(env: &EnvRef, loop_depth: usize, match_depth: usize, label: &str) -> EResult {
+    // Evaluate REPL lines in a disposable child scope: `let` binds only inside
+    // the session, while `set` and reads still reach the program's live state.
+    let session = new_env(Some(env.clone()));
+    let prompt = if label.is_empty() {
+        "repl> ".to_owned()
+    } else {
+        format!("{label}> ")
+    };
+    let mut result = Value::Null;
+    loop {
+        check_interrupted().map_err(Flow::Error)?;
+        let _ = write!(io::stderr(), "{prompt}");
+        let _ = io::stderr().flush();
+        let Some(raw) = repl_line_source() else {
+            break;
+        };
+        let line = raw.trim_end_matches(['\r', '\n']).to_owned();
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(command) = line.strip_prefix(':') {
+            match command.trim() {
+                "c" | "continue" => break,
+                "q" | "quit" => {
+                    return Err(Flow::Error(Error::Quit(
+                        "repl: aborted by user (:quit)".into(),
+                    )))
+                }
+                "h" | "help" => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "commands: :c/:continue resume, :q/:quit abort, :h/:help this help; \
+                         anything else is evaluated as Lisp"
+                    );
+                }
+                _ => {
+                    let _ = writeln!(io::stderr(), "repl: unknown command `:{command}` (try :h)");
+                }
+            }
+            continue;
+        }
+        match eval_repl_line(&line, &session, loop_depth, match_depth) {
+            Ok(value) => {
+                result = value;
+                let echo = repl_echo(&result);
+                if !echo.is_empty() {
+                    println!("{echo}");
+                }
+            }
+            Err(Flow::Error(error)) => {
+                if matches!(error, Error::Quit(_)) {
+                    // A nested (repl) quit aborts the whole run, not just this session.
+                    return Err(Flow::Error(error));
+                }
+                // Errors inside a REPL line never propagate to the program.
+                let span = match &error {
+                    Error::Parse(_) => PARSE_ERROR_SPAN.with(|span| *span.borrow()),
+                    _ => LAST_ERROR_SPAN.with(|span| *span.borrow()),
+                };
+                let _ = writeln!(io::stderr(), "{}", repl_diagnostic(&error, &line, span));
+            }
+            Err(flow) => return Err(flow), // (break)/(continue) act on the enclosing loop
+        }
+    }
+    Ok(result)
+}
+
 fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span: Span) -> EResult {
     if let ExprKind::Symbol(name) = &head.kind {
         match name.as_str() {
@@ -1309,6 +1419,17 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                     };
                 }
                 return Ok(result);
+            }
+            "repl" => {
+                if args.len() > 1 {
+                    return Err(Error::Arity("repl expects zero or one argument".into()).into());
+                }
+                let label = if args.is_empty() {
+                    String::new()
+                } else {
+                    as_str(eval(&args[0], env, l, m)?)?
+                };
+                return run_repl(env, l, m, &label);
             }
             _ => {
                 if [
