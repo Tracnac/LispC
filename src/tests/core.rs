@@ -260,6 +260,23 @@ fn aliases_write_through_in_both_directions() {
 }
 
 #[test]
+fn index_reads_via_location_shaped_bases_copy_only_the_element() {
+    // A1 routes location-shaped index bases (var/field/nested index) straight
+    // to the cell; these must behave exactly like the old evaluate-then-index
+    // path, which the rest of the suite exercises too.
+    // String single-index reads still dispatch to grapheme slicing.
+    check("(let s {msg: \"hello\"}) (expect s.msg[1] \"h\") t", "t");
+    // Slice reads keep evaluating the base as a value, not a location.
+    check("(let xs [1 2 3 4 5]) (expect xs[1..3] [1 2 3]) t", "t");
+    // Index-of-index reads are still deep value reads (no aliasing).
+    check("(let a [[1 2] [3 4]]) (expect a[2][1] 3) t", "t");
+    check(
+        "(let a [[1 2] [3 4]]) (let p a[2][1]) (set a[2][1] 9) (expect p 3) t",
+        "t",
+    );
+}
+
+#[test]
 fn expect_checks_values_and_reports_comments() {
     let value = run("(expect (eq 1 1) t \"integers compare equally\")").unwrap();
     assert!(matches!(value, Value::Bool(true)));

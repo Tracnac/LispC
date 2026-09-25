@@ -706,18 +706,47 @@ fn bind_module(name: &str, value: Value, env: &EnvRef) -> Result<(), Error> {
     Ok(())
 }
 fn follow(mut c: Cell) -> Result<Cell, Error> {
-    let mut visited = HashSet::new();
-    loop {
+    // Only cells whose value is an alias (Value::Ref) participate in a chain,
+    // so the visited set is allocated lazily, once an actual alias is seen;
+    // most calls resolve a plain cell with a single O(1) peek.
+    let mut visited: Option<HashSet<usize>> = None;
+    while matches!(&*c.borrow(), Value::Ref(_)) {
         let identity = Rc::as_ptr(&c) as usize;
-        if !visited.insert(identity) {
+        let fresh = match visited.as_mut() {
+            Some(set) => set.insert(identity),
+            None => {
+                let mut set = HashSet::new();
+                let fresh = set.insert(identity);
+                visited = Some(set);
+                fresh
+            }
+        };
+        if !fresh {
             return Err(Error::Type("cyclic reference".into()));
         }
-        let v = c.borrow().clone();
-        if let Value::Ref(next) = v {
-            c = next
-        } else {
-            return Ok(c);
-        }
+        let Value::Ref(next) = c.borrow().clone() else {
+            break; // unreachable: the peek above saw a Ref
+        };
+        c = next;
+    }
+    Ok(c)
+}
+/// Whether `value` contains an alias (Value::Ref) anywhere. Cycle detection
+/// only needs to run when this is true: values without references can only
+/// marshal freshly created or deep-copied cells, never pointers back into
+/// the live graph, so no walk can find the target cell.
+fn value_contains_ref(value: &Value) -> bool {
+    match value {
+        Value::Ref(_) => true,
+        Value::Array(values) => values
+            .borrow()
+            .iter()
+            .any(|cell| value_contains_ref(&cell.borrow())),
+        Value::Struct(fields) => fields
+            .borrow()
+            .iter()
+            .any(|(_, cell)| value_contains_ref(&cell.borrow())),
+        _ => false,
     }
 }
 fn value_references_cell(value: &Value, target: &Cell) -> bool {
@@ -818,6 +847,16 @@ fn render_nested(v: &Value) -> String {
         _ => render(v),
     }
 }
+/// Whether an expression can be resolved to an assignment cell (a variable,
+/// struct field, or array element). Used to skip evaluating location-shaped
+/// index bases to a full value copy.
+fn is_location(e: &Expr) -> bool {
+    matches!(
+        e.kind,
+        ExprKind::Symbol(_) | ExprKind::Field(_, _) | ExprKind::Index(_, _)
+    )
+}
+
 fn location(e: &Expr, env: &EnvRef) -> Result<Cell, Error> {
     match &e.kind {
         ExprKind::Symbol(n) => lookup(env, n).ok_or_else(|| Error::Name(n.clone())),
@@ -891,8 +930,18 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
             .map(|c| copy(&c.borrow()))
             .map_err(Into::into),
         ExprKind::Index(target, spec) => {
-            let value = eval(target, env, loop_depth, match_depth)?;
-            apply_index(value, spec, env, loop_depth, match_depth)
+            // Location-shaped bases (a variable, field, or nested index)
+            // resolve straight to their cell so only the selected element is
+            // copied out — never the whole collection first. Non-location
+            // bases (e.g. a call result) still evaluate to a value.
+            if matches!(spec, IndexSpec::Selector(_)) && is_location(target) {
+                let base = follow(location(target, env)?).map_err(Flow::Error)?;
+                let value = base.borrow().clone();
+                apply_index(value, spec, env, loop_depth, match_depth)
+            } else {
+                let value = eval(target, env, loop_depth, match_depth)?;
+                apply_index(value, spec, env, loop_depth, match_depth)
+            }
         }
         ExprKind::Ref(x) => location(x, env).map(Value::Ref).map_err(Into::into),
         ExprKind::Array(xs) => {
@@ -1728,7 +1777,10 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 let c = location(&args[0], env).map_err(Flow::Error)?;
                 let v = eval(&args[1], env, l, m)?;
                 let c = follow(c).map_err(Flow::Error)?;
-                if value_references_cell(&v, &c) {
+                // A cycle needs an alias somewhere in the assigned value;
+                // plain literals and copies marshal fresh cells, so the graph
+                // walk only runs when a Value::Ref is actually present.
+                if value_contains_ref(&v) && value_references_cell(&v, &c) {
                     return Err(Error::Type("cyclic reference".into()).into());
                 }
                 *c.borrow_mut() = v;
