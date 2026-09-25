@@ -2250,9 +2250,14 @@ fn validate_module(value: &Value) -> Result<(), Error> {
     }
     Ok(())
 }
+/// Valid `spec.type` names: the `value_type` vocabulary plus the `"any"` wildcard.
+const SPEC_TYPE_VOCABULARY: [&str; 10] = [
+    "null", "bool", "int", "float", "string", "array", "struct", "function", "ref", "any",
+];
+
 fn validate_descriptor_spec(
     fields: &Rc<Vec<(String, Value)>>,
-) -> Result<(usize, Vec<String>), Error> {
+) -> Result<(usize, Vec<Vec<String>>), Error> {
     // This runs on every descriptor call, while module members were already
     // validated once at `use` time — so read the spec in place instead of
     // deep-copying each field. The checks and error messages below are
@@ -2290,17 +2295,48 @@ fn validate_descriptor_spec(
             ))
         }
     };
-    let types = match spec_field("type") {
+    let types: Vec<Vec<String>> = match spec_field("type") {
         Some(Value::Null) if arity == 0 => Vec::new(),
-        Some(Value::Array(types)) if arity > 0 => types
-            .iter()
-            .map(|value| match value {
-                Value::Str(value) => Ok(value.clone()),
-                _ => Err(Error::Type(
-                    "module descriptor spec.type entries must be strings".into(),
-                )),
-            })
-            .collect::<Result<Vec<_>, _>>()?,
+        Some(Value::Array(types)) if arity > 0 => {
+            let mut entries = Vec::with_capacity(types.len());
+            for entry in types.iter() {
+                // Each entry is either a single type name, or a non-empty array of
+                // alternative type names (per-argument alternatives: the argument
+                // independently matches any member of its set).
+                let alternatives: Vec<String> = match entry {
+                    Value::Str(name) => vec![name.clone()],
+                    Value::Array(set) if !set.is_empty() => set
+                        .iter()
+                        .map(|member| match member {
+                            Value::Str(name) => Ok(name.clone()),
+                            _ => Err(Error::Type(
+                                "module descriptor spec.type set members must be strings".into(),
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    Value::Array(_) => {
+                        return Err(Error::Type(
+                            "module descriptor spec.type sets must not be empty".into(),
+                        ))
+                    }
+                    _ => return Err(Error::Type(
+                        "module descriptor spec.type entries must be strings or arrays of strings"
+                            .into(),
+                    )),
+                };
+                // Reject unknown names at registration (both singletons and set members)
+                // instead of silently registering a declaration that can never match.
+                for name in &alternatives {
+                    if !SPEC_TYPE_VOCABULARY.iter().any(|known| known == name) {
+                        return Err(Error::Type(format!(
+                            "module descriptor spec.type entry `{name}` must name a known type"
+                        )));
+                    }
+                }
+                entries.push(alternatives);
+            }
+            entries
+        }
         _ => {
             return Err(Error::Type(
                 "module descriptor spec.type must be an array, or _ for arity 0".into(),
@@ -2327,11 +2363,21 @@ fn validate_descriptor(fields: &Rc<Vec<(String, Value)>>, vals: &[Value]) -> Res
             vals.len()
         )));
     }
-    for (index, (expected, actual)) in types.iter().zip(vals).enumerate() {
+    for (index, (accepted, actual)) in types.iter().zip(vals).enumerate() {
         let actual_type = value_type(actual);
-        if expected != actual_type && expected != "any" {
+        // "any" matches every type, both as a singleton entry and inside an
+        // alternative set (where it dominates the set).
+        let matches = accepted
+            .iter()
+            .any(|name| name == "any" || name == actual_type);
+        if !matches {
+            let expects = if accepted.len() == 1 {
+                format!("expects {}", accepted[0])
+            } else {
+                format!("expects one of {}", accepted.join(", "))
+            };
             return Err(Error::Type(format!(
-                "module function argument {} expects {expected}, got {actual_type}",
+                "module function argument {} {expects}, got {actual_type}",
                 index + 1
             )));
         }

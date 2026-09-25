@@ -211,6 +211,187 @@ fn descriptor_registration_requires_a_complete_callable_spec() {
 }
 
 #[test]
+fn spec_type_singleton_entries_bind_exactly_one_type_per_argument() {
+    // A scalar singleton entry keeps the original contract: entry i is the exact
+    // type allowed for argument i.
+    let value = run(
+        r#"(use (let m {
+                inc: {_: (fn (x) (add x 1)) spec: {documentation: "inc" arity: 1 type: ["int"] return: []}}
+            })) (expect (m.inc 3) 4) t"#,
+    )
+    .unwrap();
+    assert!(matches!(value, Value::Bool(_)));
+    assert!(matches!(
+        run(
+            r#"(use (let m {
+                    inc: {_: (fn (x) (add x 1)) spec: {documentation: "inc" arity: 1 type: ["int"] return: []}}
+                })) (m.inc "3")"#
+        ),
+        Err(Error::Type(message)) if message.contains("argument 1 expects int, got string")
+    ));
+}
+
+#[test]
+fn spec_type_alternative_sets_accept_any_member_per_argument() {
+    // One argument with a bounded set: int OR float is accepted.
+    let value = run(
+        r#"(use (let m {
+                twice: {_: (fn (x) (mul x 2)) spec: {documentation: "twice" arity: 1 type: [["int" "float"]] return: []}}
+            }))
+            (expect (m.twice 3) 6)
+            (expect (m.twice 3.5) 7.0) t"#,
+    )
+    .unwrap();
+    assert!(matches!(value, Value::Bool(_)));
+    // A type outside the set is rejected, naming the allowed alternatives.
+    assert!(matches!(
+        run(
+            r#"(use (let m {
+                    twice: {_: (fn (x) (mul x 2)) spec: {documentation: "twice" arity: 1 type: [["int" "float"]] return: []}}
+                })) (m.twice "3")"#
+        ),
+        Err(Error::Type(message))
+            if message.contains("argument 1 expects one of int, float, got string")
+    ));
+}
+
+#[test]
+fn spec_type_alternatives_are_independent_per_argument_position() {
+    // arg 1 ∈ {int, float} AND arg 2 = string — the accepted combinations are
+    // the cross product, never whole-signature overloads.
+    let module = r#"(use (let m {
+            pick: {_: (fn (x y) x) spec: {documentation: "pick" arity: 2 type: [["int" "float"] "string"] return: []}}
+        }))"#;
+    let ok = run(&format!(
+        "{module} (expect (m.pick 1 \"a\") 1) (expect (m.pick 1.5 \"a\") 1.5) t"
+    ))
+    .unwrap();
+    assert!(matches!(ok, Value::Bool(_)));
+    // Each position is checked against its own entry, in order.
+    assert!(matches!(
+        run(&format!("{module} (m.pick 1 1.5)")),
+        Err(Error::Type(message)) if message.contains("argument 2 expects string, got float")
+    ));
+    assert!(matches!(
+        run(&format!("{module} (m.pick \"a\" \"b\")")),
+        Err(Error::Type(message))
+            if message.contains("argument 1 expects one of int, float, got string")
+    ));
+}
+
+#[test]
+fn spec_type_any_accepts_everything_bare_and_inside_a_set() {
+    // "any" inside an alternative set dominates it: every type is accepted.
+    let value = run(
+        r#"(use (let m {
+                f: {_: (fn (x) x) spec: {documentation: "f" arity: 1 type: [["int" "any"]] return: []}}
+            }))
+            (expect (m.f 42) 42)
+            (expect (m.f "s") "s")
+            (expect (m.f {a: 1}) {a: 1}) t"#,
+    )
+    .unwrap();
+    assert!(matches!(value, Value::Bool(_)));
+    // Bare "any" singleton (the http-post-style body stopgap) keeps working.
+    let value = run(r#"(use (let m {
+                f: {_: (fn (x) x) spec: {documentation: "f" arity: 1 type: ["any"] return: []}}
+            })) (expect (m.f [1 2]) [1 2]) t"#)
+    .unwrap();
+    assert!(matches!(value, Value::Bool(_)));
+}
+
+#[test]
+fn spec_type_ref_is_a_first_class_vocabulary_member() {
+    // A ^ alias argument satisfies a "ref" expectation; reading it inside the
+    // function derefs to the current value.
+    let value = run(
+        r#"(use (let m {
+                head: {_: (fn (x) x) spec: {documentation: "head" arity: 1 type: ["ref"] return: []}}
+            }))
+            (let a [1 2])
+            (expect (m.head ^a[1]) 1) t"#,
+    )
+    .unwrap();
+    assert!(matches!(value, Value::Bool(_)));
+    // A plain value is not a ref.
+    assert!(matches!(
+        run(
+            r#"(use (let m {
+                    head: {_: (fn (x) x) spec: {documentation: "head" arity: 1 type: ["ref"] return: []}}
+                })) (m.head 5)"#
+        ),
+        Err(Error::Type(message)) if message.contains("argument 1 expects ref, got int")
+    ));
+}
+
+#[test]
+fn spec_type_registration_rejects_invalid_entries() {
+    let descriptor = |type_field: &str| {
+        format!(
+            r#"(use (let m {{f: {{_: (fn (x) x) spec: {{documentation: "f" arity: 1 type: {type_field} return: []}}}}}}))"#
+        )
+    };
+    // Unknown type names are rejected at registration, never silently registered
+    // as never-matching declarations — singletons and set members alike.
+    assert!(matches!(
+        run(&descriptor(r#"["all"]"#)),
+        Err(Error::Type(message)) if message.contains("`all` must name a known type")
+    ));
+    assert!(matches!(
+        run(&descriptor(r#"[["int" "streng"]]"#)),
+        Err(Error::Type(message)) if message.contains("`streng` must name a known type")
+    ));
+    // Empty alternative sets are rejected.
+    assert!(matches!(
+        run(&descriptor(r#"[[]]"#)),
+        Err(Error::Type(message)) if message.contains("sets must not be empty")
+    ));
+    // Non-string set members are rejected.
+    assert!(matches!(
+        run(&descriptor(r#"[["int" 3]]"#)),
+        Err(Error::Type(message)) if message.contains("set members must be strings")
+    ));
+    // Scalar non-string, non-array entries are rejected.
+    assert!(matches!(
+        run(&descriptor(r#"[3]"#)),
+        Err(Error::Type(message)) if message.contains("entries must be strings or arrays")
+    ));
+    // The length must still match arity exactly, whatever the entry shape.
+    assert!(matches!(
+        run(&descriptor(r#"[["int" "float"]]"#).replace("arity: 1", "arity: 2")),
+        Err(Error::Type(message))
+            if message.contains("spec.type length must match spec.arity")
+    ));
+}
+
+#[test]
+fn spec_type_mutation_affects_subsequent_calls_live() {
+    // The spec is read fresh at each call: mutating spec.type from a set to a
+    // different set takes effect immediately.
+    let value = run(
+        r#"(use (let m {
+                f: {_: (fn (x) x) spec: {documentation: "f" arity: 1 type: [["int" "float"]] return: []}}
+            }))
+            (expect (m.f 3) 3)
+            (set m.f.spec.type [["string"]])
+            (expect (m.f "ok") "ok") t"#,
+    )
+    .unwrap();
+    assert!(matches!(value, Value::Bool(_)));
+    // After the mutation the previously-valid argument type fails at call time.
+    assert!(matches!(
+        run(
+            r#"(use (let m {
+                    f: {_: (fn (x) x) spec: {documentation: "f" arity: 1 type: [["int" "float"]] return: []}}
+                }))
+                (set m.f.spec.type [["string"]])
+                (m.f 3)"#
+        ),
+        Err(Error::Type(message)) if message.contains("argument 1 expects string, got int")
+    ));
+}
+
+#[test]
 fn use_binds_like_let_and_never_modifies_an_existing_binding() {
     // `use` defines a module name in the current scope (like `let`): it must
     // never overwrite an existing variable — only `set` modifies a binding (§4).

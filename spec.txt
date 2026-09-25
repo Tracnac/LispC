@@ -63,9 +63,20 @@ Les symboles `t`, `f`, `_`, `NaN`, `+NaN`, `Inf`, `+Inf` et `-Inf` sont des litt
   liaison existante. L'ombre portée d'une liaison parent reste autorisée.
 * Tout membre appelable d'un module doit être un descripteur `{_: callable spec: ...}`.
   `spec` doit contenir `documentation` (string), `arity` (integer), `type` (array, ou `_`
-  lorsque `arity` vaut zéro) et `return` (array ou `_`). Chaque entrée de `type` est un nom de
-  type (string) ; l'entrée spéciale `"any"` accepte tout type d'argument. Ces champs sont
-  validés dès l'enregistrement du module et `arity`/`type` sont également appliqués à chaque appel.
+  lorsque `arity` vaut zéro) et `return` (array ou `_`). `type` est une signature unique : un
+  tableau d'exactement `arity` entrées, liées positionnellement aux paramètres. Chaque entrée
+  est soit un nom de type unique, soit un tableau non vide de noms de type : dans ce cas,
+  l'argument est accepté s'il correspond à l'un des types alternatifs, indépendamment des
+  autres arguments (les combinaisons autorisées sont le produit cartésien des ensembles — il ne
+  s'agit en aucun cas de surcharge/alternatives par signature complète ; `arity` reste un
+  entier fixe unique et la longueur de `type` doit toujours égaler `arity`). Le vocabulaire des
+  noms de type est `null`, `bool`, `int`, `float`, `string`, `array`, `struct`, `function`,
+  `ref` et `any`. L'entrée spéciale `"any"` accepte tout type d'argument, seule ou dans un
+  ensemble alternatif (où elle domine l'ensemble). Un nom inconnu et un ensemble vide sont
+  refusés dès l'enregistrement du module (jamais une déclaration silencieuse qui ne peut
+  matcher) ; `return` est déclaratif uniquement (forme validée, jamais appliquée à la valeur
+  retournée). Ces champs sont validés dès l'enregistrement du module et `arity`/`type` sont
+  également appliqués à chaque appel.
   Un module natif est une struct ordinaire ; ses membres appelables utilisent un champ `_`
   et un champ `spec`, comme les descripteurs Lisp.
 * Seule une struct qui est un descripteur complet (champ `_` et champ `spec`) est appelable :

@@ -44,6 +44,28 @@ Small Lisp includes:
 - synchronous HTTP requests and file-descriptor IO
 - Native modules are loaded with `use`.
 
+### Module descriptors
+
+Modules expose callable descriptors of the form `{_: <callable> spec: {...}}`. The `spec`
+carries `documentation` (string), `arity` (integer), `type` (array — or `_` when `arity` is 0)
+and `return` (array or `_`). `type` is one flat signature of exactly `arity` entries bound
+positionally to the parameters; each entry is either a single type name or a non-empty array of
+alternative type names, checked independently per argument:
+
+```lisp
+spec: { documentation: "add" arity: 2
+        type: [["int" "float"] "string"]   ; arg 1 ∈ {int, float}, arg 2 = string
+        return: ["int"] }
+```
+
+The type vocabulary is `null | bool | int | float | string | array | struct | function | ref |
+any`. `"any"` accepts every type — as a bare singleton entry or inside an alternative set, where
+it dominates the set. Unknown type names and empty alternative sets are rejected when the module
+is registered, never silently accepted as never-matching declarations. `arity` stays a single
+fixed integer and `type` length must always equal it: alternatives are per-argument only (the
+allowed combinations are the cross product of the per-argument sets), never whole-signature
+overloads. `return` is declaration-only and not enforced at call time.
+
 ### Arrays and strings
 
 Array indexes are 1-based and support negative indexes. Ranges are inclusive and may omit either
