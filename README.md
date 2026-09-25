@@ -127,6 +127,15 @@ read and write:
   `%v` keeps the `Ref(...)` wrapper explicit so cyclic structures stay renderable, and `%t` on a
   reference yields `ref`.
 
+**Implementation note (performance).** The model is deliberately simple: reads are O(1) `Rc`
+shares of immutable snapshots (the major win), while each write rebuilds the snapshot chain along
+the path — a full array/struct copy per level, O(children) per level — so writes into large or
+deeply nested composites are the residual cost. Moving to a fancier persistent structure (e.g. a
+32-way vector trie) is explicitly **out of scope for this implementation** and stays deferred
+unless a *realistic write-heavy workload* shows `set` consuming more than ~30–40% of runtime;
+microbenchmarks alone are not sufficient justification. The `Rc<Vec>` model is correct,
+well-tested, and already delivers the targeted speedup.
+
 ## File IO
 
 Load the native `io` module with `(use "io")`. `io.open` accepts file URIs whose `mode` query parameter is one of `r`, `r+`, `w`, `w+`, `a`, or `a+`. It returns an integer file descriptor. `io.read` reads one UTF-8 line without its EOL and returns `_` at EOF; `io.write` writes a string and returns its byte count; `io.close` returns `t` when it closes an open descriptor and `f` otherwise.

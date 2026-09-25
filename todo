@@ -42,8 +42,12 @@ Performance
   paths deterministically, reads/binds/args are value snapshots, aliases write through with
   replace-at-leaf at final positions, cycles still fail with "cyclic reference", and %v keeps
   the Ref(...) wrapper while %s/%x/%j/%q deref. The 32-way persistent vector remains a SEPARATE
-  future optimization, deliberately not part of this change; re-evaluate only if array-write
-  benchmarks dominate real workloads (see the decision note in the Model P summary).
+  future optimization, deliberately not part of this change. Explicit trigger criteria: re-open
+  the trie only when a REALISTIC write-heavy workload (nested struct transforms / large-array
+  updates in actual scripts) shows `set` consuming more than ~30–40% of runtime; the
+  microbenchmark alone (even set_elem_big, already 4.2× faster) is not sufficient justification.
+  The Rc<Vec> model stays: simple, correct, well-tested (463 tests), and it already delivers the
+  targeted win.
 
 Bug
 ===
