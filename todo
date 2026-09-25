@@ -13,7 +13,29 @@ Performance
   remove the remaining scans, but it would go stale if `set` mutates a spec — that belongs
   with the persistent-representation work below. (was 10)
 
-- Deep copy on every read — the core cost of the "value semantics with explicit ^ aliasing" design. Every variable read, field access, and index (src/main.rs:821, 824, 896, 901, 919) does a full recursive copy() of arrays/structs, and every set/bind runs a full O(n) graph walk with fresh HashSets for cycle detection. Combined with per-element Cell allocation, arrays are expensive to build and to access. Fine for a scripting interpreter, but it's the root of both the crash fixed in 1–4 and most constant-factor slowness. A persistent/shared representation would help. (was 5)
+- Resolved: deep copy on every read — the core cost of the "value semantics with explicit ^
+  aliasing" design. Every variable read, field access, and index did a full recursive copy() of
+  arrays/structs, and every set/bind ran a full O(n) graph walk with fresh HashSets for cycle
+  detection. Model P replaces this: array/struct snapshots are immutable (Rc<Vec<Value>> /
+  Rc<Vec<(String, Value)>>), so reads are O(1)-shallow (shared) clones; a ^ alias is a logical
+  location (root Cell + path, resolved against the current value at read/write time — it never
+  pins an intermediate node, so a whole-value rebind invalidates element/field aliases and they
+  fail deterministically instead of exposing stale data); writes resolve the terminal location
+  (follow cell chains + translate intermediate value aliases: write-through), rebuild the
+  immutable snapshot chain along the path (whole-array/struct copy per level, O(children)), and
+  replace the value in the terminal cell — aliases stay live while rebinds stay isolated. Cycle
+  detection walks only when the written value contains a Ref (all 8 locked cases still say
+  "cyclic reference"; sibling/sibling and helper/root chains now caught via the landing-walk).
+  Benchmark (release, 100k iters, best-of-3, ns/iter; before → after A1–A3 → Model P): bare
+  646→565→627, fn_int 974→891→1002, fn_arr5 1431→1350→1129, fn_arr100 7385→7295→2411 (3.0×),
+  fn_nested5x5 3662→3566→1712 (2.1×), index_read 1154→992→949, field_read 1044→965→1036,
+  nested_read 1148→917→1103, set_elem_scalar 928→664→906, set_nested 1044→671→1040,
+  set_elem_big 10607→4521→2521 (4.2× vs before). The deep-copy tax on array-heavy work is gone
+  (≈3× on fn_arr100, ≈2× on fn_nested5x5); small-scalar cases jitter ±10–60 ns from allocator
+  noise. Residual: each set rebuilds the full array/struct chain at every level (O(children)
+  per level) — a structural-sharing/persistent-Vec (e.g. a 32-way trie) would make array writes
+  sub-linear; and intermediate alias chains make field/nested reads a hair slower than the old
+  flat-cell layout. (was 5)
 
 Bug
 ===

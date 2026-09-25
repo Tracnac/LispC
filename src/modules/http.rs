@@ -1,70 +1,70 @@
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 
 use super::super::{json_render, Error, NativeFunction, Value};
 
 pub fn module() -> Value {
-    Value::Struct(Rc::new(RefCell::new(vec![
+    Value::Struct(Rc::new(vec![
         (
             "get".to_owned(),
-            Rc::new(RefCell::new(descriptor(
+            descriptor(
                 "http.get",
                 get,
                 "Perform a synchronous HTTP GET request and return the response.",
                 1,
                 &["string"],
-            ))),
+            ),
         ),
         (
             "head".to_owned(),
-            Rc::new(RefCell::new(descriptor(
+            descriptor(
                 "http.head",
                 head,
                 "Perform a synchronous HTTP HEAD request and return an empty string.",
                 1,
                 &["string"],
-            ))),
+            ),
         ),
         (
             "delete".to_owned(),
-            Rc::new(RefCell::new(descriptor(
+            descriptor(
                 "http.delete",
                 delete,
                 "Perform a synchronous HTTP DELETE request and return the response.",
                 1,
                 &["string"],
-            ))),
+            ),
         ),
         (
             "post".to_owned(),
-            Rc::new(RefCell::new(descriptor(
+            descriptor(
                 "http.post",
                 post,
                 "Perform a synchronous HTTP POST request with a JSON body.",
                 2,
                 &["string", "any"],
-            ))),
+            ),
         ),
         (
             "put".to_owned(),
-            Rc::new(RefCell::new(descriptor(
+            descriptor(
                 "http.put",
                 put,
                 "Perform a synchronous HTTP PUT request with a JSON body.",
                 2,
                 &["string", "any"],
-            ))),
+            ),
         ),
         (
             "patch".to_owned(),
-            Rc::new(RefCell::new(descriptor(
+            descriptor(
                 "http.patch",
                 patch,
                 "Perform a synchronous HTTP PATCH request with a JSON body.",
                 2,
                 &["string", "any"],
-            ))),
+            ),
         ),
-    ])))
+    ]))
 }
 
 fn descriptor(
@@ -75,33 +75,31 @@ fn descriptor(
     types: &[&str],
 ) -> Value {
     let values = |items: &[&str]| {
-        Value::Array(Rc::new(RefCell::new(
+        Value::Array(Rc::new(
             items
                 .iter()
-                .map(|item| Rc::new(RefCell::new(Value::Str((*item).to_owned()))))
+                .map(|item| Value::Str((*item).to_owned()))
                 .collect(),
-        )))
+        ))
     };
     // The response type is dynamic (string, struct, array, or null depending on
     // Content-Type), so the spec declares no single return type (`_`).
-    let spec = Value::Struct(Rc::new(RefCell::new(vec![
+    let spec = Value::Struct(Rc::new(vec![
         (
             "documentation".to_owned(),
-            Rc::new(RefCell::new(Value::Str(documentation.to_owned()))),
+            Value::Str(documentation.to_owned()),
         ),
-        ("arity".to_owned(), Rc::new(RefCell::new(Value::Int(arity)))),
-        ("type".to_owned(), Rc::new(RefCell::new(values(types)))),
-        ("return".to_owned(), Rc::new(RefCell::new(Value::Null))),
-    ])));
-    Value::Struct(Rc::new(RefCell::new(vec![
+        ("arity".to_owned(), Value::Int(arity)),
+        ("type".to_owned(), values(types)),
+        ("return".to_owned(), Value::Null),
+    ]));
+    Value::Struct(Rc::new(vec![
         (
             "_".to_owned(),
-            Rc::new(RefCell::new(Value::NativeFunction(Rc::new(
-                NativeFunction { name, call },
-            )))),
+            Value::NativeFunction(Rc::new(NativeFunction { name, call })),
         ),
-        ("spec".to_owned(), Rc::new(RefCell::new(spec))),
-    ])))
+        ("spec".to_owned(), spec),
+    ]))
 }
 
 fn get(args: Vec<Value>) -> Result<Value, Error> {
@@ -219,17 +217,17 @@ fn json_to_value(value: serde_json::Value) -> Result<Value, Error> {
             }
         }
         serde_json::Value::String(value) => Ok(Value::Str(value)),
-        serde_json::Value::Array(values) => Ok(Value::Array(Rc::new(RefCell::new(
+        serde_json::Value::Array(values) => Ok(Value::Array(Rc::new(
             values
                 .into_iter()
-                .map(|value| json_to_value(value).map(|value| Rc::new(RefCell::new(value))))
+                .map(json_to_value)
                 .collect::<Result<Vec<_>, _>>()?,
-        )))),
-        serde_json::Value::Object(fields) => Ok(Value::Struct(Rc::new(RefCell::new(
+        ))),
+        serde_json::Value::Object(fields) => Ok(Value::Struct(Rc::new(
             fields
                 .into_iter()
-                .map(|(key, value)| Ok((key, Rc::new(RefCell::new(json_to_value(value)?)))))
+                .map(|(key, value)| Ok((key, json_to_value(value)?)))
                 .collect::<Result<Vec<_>, Error>>()?,
-        )))),
+        ))),
     }
 }

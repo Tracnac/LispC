@@ -16,6 +16,25 @@ mod modules;
 type Cell = Rc<RefCell<Value>>;
 type EnvRef = Rc<RefCell<Env>>;
 
+/// One step of a location path: inside the root cell's value, descend to an
+/// array element or a struct field.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum PathStep {
+    Index(i64),
+    Field(String),
+}
+
+/// A reference to a logical location: a root cell plus the path from that
+/// cell's current value to the referenced position. A Ref is resolved against
+/// the CURRENT value at read/write time — it never pins or holds a snapshot
+/// of an intermediate node, and the root cell stays alive for the Ref's whole
+/// lifetime so no dangling storage is ever exposed.
+#[derive(Clone)]
+struct RefLocation {
+    root: Cell,
+    path: Vec<PathStep>,
+}
+
 #[derive(Clone)]
 enum Value {
     Null,
@@ -23,11 +42,14 @@ enum Value {
     Int(i64),
     Float(f64),
     Str(String),
-    Array(Rc<RefCell<Vec<Cell>>>),
-    Struct(Rc<RefCell<Vec<(String, Cell)>>>),
+    /// Immutable snapshot: no interior Value is ever mutated in place.
+    /// Writes rebuild a fresh snapshot and replace the value in the owning
+    /// (root/location) cell.
+    Array(Rc<Vec<Value>>),
+    Struct(Rc<Vec<(String, Value)>>),
     Function(Rc<Function>),
     NativeFunction(Rc<NativeFunction>),
-    Ref(Cell),
+    Ref(Rc<RefLocation>),
 }
 #[derive(Clone, Debug)]
 enum IndexSpec {
@@ -705,13 +727,16 @@ fn bind_module(name: &str, value: Value, env: &EnvRef) -> Result<(), Error> {
         .push((name.to_owned(), Rc::new(RefCell::new(value))));
     Ok(())
 }
-fn follow(mut c: Cell) -> Result<Cell, Error> {
+fn follow(c: Cell) -> Result<(Cell, Vec<PathStep>), Error> {
     // Only cells whose value is an alias (Value::Ref) participate in a chain,
-    // so the visited set is allocated lazily, once an actual alias is seen;
-    // most calls resolve a plain cell with a single O(1) peek.
+    // so the visited set is allocated lazily, once an actual alias is seen.
+    let (mut root, mut steps) = (c, Vec::new());
     let mut visited: Option<HashSet<usize>> = None;
-    while matches!(&*c.borrow(), Value::Ref(_)) {
-        let identity = Rc::as_ptr(&c) as usize;
+    loop {
+        if !matches!(&*root.borrow(), Value::Ref(_)) {
+            return Ok((root, steps));
+        }
+        let identity = Rc::as_ptr(&root) as usize;
         let fresh = match visited.as_mut() {
             Some(set) => set.insert(identity),
             None => {
@@ -724,84 +749,269 @@ fn follow(mut c: Cell) -> Result<Cell, Error> {
         if !fresh {
             return Err(Error::Type("cyclic reference".into()));
         }
-        let Value::Ref(next) = c.borrow().clone() else {
-            break; // unreachable: the peek above saw a Ref
+        let value = root.borrow().clone();
+        let Value::Ref(loc) = value else {
+            return Ok((root, steps));
         };
-        c = next;
+        root = loc.root.clone();
+        // The chain's own steps come before what we already accumulated.
+        let mut combined = loc.path.clone();
+        combined.append(&mut steps);
+        steps = combined;
     }
-    Ok(c)
 }
+
+/// Resolve a location to its terminal (root cell, path) plus the value
+/// currently there — WITHOUT resolving away an alias that sits at the
+/// landing. Cell-level chains and value-level aliases on intermediate steps
+/// are fully followed, so the returned (root, path) is the canonical location
+/// a deref would read. Fails deterministically when the path no longer exists
+/// or an intermediate value has the wrong type.
+fn deref_landing(root: &Cell, steps: &[PathStep]) -> Result<(Cell, Vec<PathStep>, Value), Error> {
+    let (root, prefix) = follow(root.clone())?;
+    let mut all = prefix;
+    all.extend(steps.iter().cloned());
+    let mut value = root.borrow().clone();
+    for (i, step) in all.iter().enumerate() {
+        value = step_into(&value, step)?;
+        if let Value::Ref(loc) = value {
+            // The remaining steps continue inside the aliased location.
+            let mut remaining = loc.path.clone();
+            remaining.extend(all.iter().skip(i + 1).cloned());
+            return deref_landing(&loc.root, &remaining);
+        }
+    }
+    Ok((root, all, value))
+}
+
+/// The value currently at a location (root cell + path), shallow-cloned.
+fn deref(root: &Cell, steps: &[PathStep]) -> Result<Value, Error> {
+    match deref_landing(root, steps)?.2 {
+        Value::Ref(loc) => deref(&loc.root, &loc.path),
+        other => Ok(other),
+    }
+}
+
+/// Resolve a value that may be an alias to the value it denotes.
+fn deref_value(value: Value) -> Result<Value, Error> {
+    match value {
+        Value::Ref(loc) => deref(&loc.root, &loc.path),
+        other => Ok(other),
+    }
+}
+
+/// Clone the child value at one path step, or fail with the documented
+/// type/name error. The child may itself be an alias, which the caller
+/// resolves.
+fn step_into(value: &Value, step: &PathStep) -> Result<Value, Error> {
+    match (value, step) {
+        (Value::Array(items), PathStep::Index(i)) => {
+            let position = collection_position(&Value::Int(*i), items.len(), "array")?;
+            Ok(items[position].clone())
+        }
+        (Value::Struct(fields), PathStep::Field(name)) => fields
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, v)| v.clone())
+            .ok_or_else(|| Error::Name(format!("field {name}"))),
+        (Value::Array(_), PathStep::Field(_)) => {
+            Err(Error::Type("struct field access requires a struct".into()))
+        }
+        (Value::Struct(_), PathStep::Index(_)) => {
+            Err(Error::Type("indexing requires an array".into()))
+        }
+        (_, PathStep::Index(_)) => Err(Error::Type("indexing requires an array".into())),
+        (_, PathStep::Field(_)) => Err(Error::Type("struct field access requires a struct".into())),
+    }
+}
+
+/// Replace the child at the FINAL step of `steps` inside `value`, rebuilding
+/// every immutable snapshot along the path and returning the new top-level
+/// value. The final step's current child is replaced outright — an alias
+/// sitting at that position is a normal value and is reassigned, not written
+/// through — matching the documented location semantics. Intermediate steps
+/// were validated by `terminal_location`, which also translated value-level
+/// aliases into jumps, so this pass only rebuilds.
+fn update_snapshot(value: Value, steps: &[PathStep], new: Value) -> Result<Value, Error> {
+    if steps.len() == 1 {
+        return set_last(value, steps[0].clone(), new);
+    }
+    match (&value, &steps[0]) {
+        (Value::Array(items), PathStep::Index(i)) => {
+            let position = collection_position(&Value::Int(*i), items.len(), "array")?;
+            let mut updated = (**items).clone();
+            updated[position] = update_snapshot(updated[position].clone(), &steps[1..], new)?;
+            Ok(Value::Array(Rc::new(updated)))
+        }
+        (Value::Struct(fields), PathStep::Field(name)) => {
+            let position = fields
+                .iter()
+                .position(|(key, _)| key == name)
+                .ok_or_else(|| Error::Name(format!("field {name}")))?;
+            let mut updated = (**fields).clone();
+            updated[position].1 = update_snapshot(updated[position].1.clone(), &steps[1..], new)?;
+            Ok(Value::Struct(Rc::new(updated)))
+        }
+        (Value::Array(_), PathStep::Field(_)) => {
+            Err(Error::Type("struct field access requires a struct".into()))
+        }
+        (Value::Struct(_), PathStep::Index(_)) => {
+            Err(Error::Type("indexing requires an array".into()))
+        }
+        (_, PathStep::Index(_)) => Err(Error::Type("indexing requires an array".into())),
+        (_, PathStep::Field(_)) => Err(Error::Type("struct field access requires a struct".into())),
+    }
+}
+
+/// Replace the child at a single final step inside `value`, returning a new
+/// immutable snapshot.
+fn set_last(value: Value, step: PathStep, new: Value) -> Result<Value, Error> {
+    match (value, step) {
+        (Value::Array(items), PathStep::Index(i)) => {
+            let position = collection_position(&Value::Int(i), items.len(), "array")?;
+            let mut updated = (*items).clone();
+            updated[position] = new;
+            Ok(Value::Array(Rc::new(updated)))
+        }
+        (Value::Struct(fields), PathStep::Field(name)) => {
+            let position = fields
+                .iter()
+                .position(|(key, _)| key == &name)
+                .ok_or_else(|| Error::Name(format!("field {name}")))?;
+            let mut updated = (*fields).clone();
+            updated[position].1 = new;
+            Ok(Value::Struct(Rc::new(updated)))
+        }
+        (Value::Array(_), PathStep::Field(_)) => {
+            Err(Error::Type("struct field access requires a struct".into()))
+        }
+        (Value::Struct(_), PathStep::Index(_)) => {
+            Err(Error::Type("indexing requires an array".into()))
+        }
+        (_, PathStep::Index(_)) => Err(Error::Type("indexing requires an array".into())),
+        (_, PathStep::Field(_)) => Err(Error::Type("struct field access requires a struct".into())),
+    }
+}
+
+/// Resolve a location to its terminal write target: follow the root cell's
+/// alias chain, then walk the path's intermediate steps (validating them),
+/// translating any value-level alias encountered along the way into a jump —
+/// the remaining steps continue inside that alias's location (written
+/// through). Returns the terminal root cell, the full remaining path, and the
+/// container value the final step applies to. The final step itself is
+/// validated by the write. Fails deterministically when an intermediate step
+/// no longer exists or has the wrong type.
+fn terminal_location(
+    root: Cell,
+    steps: Vec<PathStep>,
+) -> Result<(Cell, Vec<PathStep>, Value), Error> {
+    let (root, chain) = follow(root)?;
+    let mut all = chain;
+    all.extend(steps);
+    if all.is_empty() {
+        let value = root.borrow().clone();
+        return Ok((root, all, value));
+    }
+    let mut value = root.borrow().clone();
+    for i in 0..all.len() - 1 {
+        value = step_into(&value, &all[i])?;
+        if let Value::Ref(loc) = value {
+            let (r, chain) = follow(loc.root.clone())?;
+            let mut rest = chain;
+            rest.extend(loc.path.iter().cloned());
+            rest.extend(all.iter().skip(i + 1).cloned());
+            return terminal_location(r, rest);
+        }
+    }
+    Ok((root, all, value))
+}
+
+/// Perform a logical-location write to an already-resolved terminal target:
+/// rebuild the immutable snapshots along the whole path and replace the value
+/// in the terminal cell. Snapshots are never mutated; the caller resolves the
+/// location with `terminal_location` (which follows cell-level chains and
+/// translates value-level aliases on intermediate steps into jumps), so a
+/// cycle check can reuse the same result. Fails deterministically when the
+/// path is invalid.
+fn assign_to(root: Cell, steps: Vec<PathStep>, new: Value) -> Result<(), Error> {
+    if steps.is_empty() {
+        *root.borrow_mut() = new;
+        return Ok(());
+    }
+    let value = root.borrow().clone();
+    let updated = update_snapshot(value, &steps, new)?;
+    *root.borrow_mut() = updated;
+    Ok(())
+}
+
 /// Whether `value` contains an alias (Value::Ref) anywhere. Cycle detection
 /// only needs to run when this is true: values without references can only
-/// marshal freshly created or deep-copied cells, never pointers back into
-/// the live graph, so no walk can find the target cell.
+/// marshal freshly created snapshots, so no walk can reach an existing
+/// location.
 fn value_contains_ref(value: &Value) -> bool {
     match value {
         Value::Ref(_) => true,
-        Value::Array(values) => values
-            .borrow()
-            .iter()
-            .any(|cell| value_contains_ref(&cell.borrow())),
-        Value::Struct(fields) => fields
-            .borrow()
-            .iter()
-            .any(|(_, cell)| value_contains_ref(&cell.borrow())),
+        Value::Array(items) => items.iter().any(value_contains_ref),
+        Value::Struct(fields) => fields.iter().any(|(_, v)| value_contains_ref(v)),
         _ => false,
     }
 }
-fn value_references_cell(value: &Value, target: &Cell) -> bool {
-    fn visit(cell: &Cell, target: &Cell, visited: &mut HashSet<usize>) -> bool {
-        let identity = Rc::as_ptr(cell) as usize;
-        if !visited.insert(identity) {
-            return false;
-        }
-        if Rc::ptr_eq(cell, target) {
-            return true;
-        }
-        match &*cell.borrow() {
-            Value::Ref(next) => visit(next, target, visited),
-            Value::Array(values) => {
-                let cells: Vec<Cell> = values.borrow().iter().cloned().collect();
-                cells.iter().any(|cell| visit(cell, target, visited))
+
+/// Whether writing `value` to a location (root cell + path) creates a cycle:
+/// true when some alias reachable from `value` resolves back to that same
+/// location (or passes through it), so dereferencing the written value would
+/// loop forever.
+fn creates_cycle(value: &Value, root: &Cell, path: &[PathStep]) -> bool {
+    fn is_prefix(prefix: &[PathStep], full: &[PathStep]) -> bool {
+        prefix.len() <= full.len() && prefix.iter().zip(full.iter()).all(|(a, b)| a == b)
+    }
+    fn hit(root: &Cell, path: &[PathStep], target: &Cell, target_path: &[PathStep]) -> bool {
+        Rc::ptr_eq(root, target) && (is_prefix(path, target_path) || is_prefix(target_path, path))
+    }
+    fn reachable(
+        value: &Value,
+        target: &Cell,
+        target_path: &[PathStep],
+        seen: &mut HashSet<(usize, Vec<PathStep>)>,
+    ) -> bool {
+        match value {
+            Value::Ref(loc) => {
+                // A direct hit on the target location (same root, one path a
+                // prefix of the other) is a cycle: reading it reaches the
+                // written position.
+                if hit(&loc.root, &loc.path, target, target_path) {
+                    return true;
+                }
+                // Resolve to the canonical landing WITHOUT flattening away an
+                // alias that sits at the end of the path, then walk the
+                // landing: its location may pass through the target (e.g. two
+                // elements referencing each other) even when the alias itself
+                // did not.
+                match deref_landing(&loc.root, &loc.path) {
+                    Ok((landing_root, landing_path, landing)) => {
+                        if hit(&landing_root, &landing_path, target, target_path) {
+                            return true;
+                        }
+                        let key = (Rc::as_ptr(&landing_root) as usize, landing_path);
+                        if !seen.insert(key) {
+                            return false; // location already walked, cannot add a cycle
+                        }
+                        reachable(&landing, target, target_path, seen)
+                    }
+                    Err(_) => false, // invalid path: the read fails, cannot cycle
+                }
             }
-            Value::Struct(fields) => {
-                let cells: Vec<Cell> = fields.borrow().iter().map(|(_, c)| c.clone()).collect();
-                cells.iter().any(|cell| visit(cell, target, visited))
-            }
+            Value::Array(items) => items
+                .iter()
+                .any(|item| reachable(item, target, target_path, seen)),
+            Value::Struct(fields) => fields
+                .iter()
+                .any(|(_, v)| reachable(v, target, target_path, seen)),
             _ => false,
         }
     }
-    let mut visited = HashSet::new();
-    match value {
-        Value::Ref(cell) => visit(cell, target, &mut visited),
-        Value::Array(values) => {
-            let cells: Vec<Cell> = values.borrow().iter().cloned().collect();
-            cells.iter().any(|cell| visit(cell, target, &mut visited))
-        }
-        Value::Struct(fields) => {
-            let cells: Vec<Cell> = fields.borrow().iter().map(|(_, c)| c.clone()).collect();
-            cells.iter().any(|cell| visit(cell, target, &mut visited))
-        }
-        _ => false,
-    }
-}
-fn copy(v: &Value) -> Value {
-    match v {
-        Value::Ref(c) => copy(&c.borrow()),
-        Value::Array(a) => Value::Array(Rc::new(RefCell::new(
-            a.borrow()
-                .iter()
-                .map(|c| Rc::new(RefCell::new(copy(&c.borrow()))))
-                .collect(),
-        ))),
-        Value::Struct(s) => Value::Struct(Rc::new(RefCell::new(
-            s.borrow()
-                .iter()
-                .map(|(k, c)| (k.clone(), Rc::new(RefCell::new(copy(&c.borrow())))))
-                .collect(),
-        ))),
-        x => x.clone(),
-    }
+    let mut seen = HashSet::new();
+    reachable(value, root, path, &mut seen)
 }
 fn truth(v: &Value) -> bool {
     match v {
@@ -818,20 +1028,18 @@ fn render(v: &Value) -> String {
         Value::Int(x) => x.to_string(),
         Value::Float(x) => float_render(*x),
         Value::Str(x) => x.clone(),
-        Value::Ref(c) => render(&c.borrow()),
+        Value::Ref(loc) => match deref(&loc.root, &loc.path) {
+            Ok(value) => render(&value),
+            Err(_) => "<invalid reference>".into(),
+        },
         Value::Array(a) => format!(
             "[{}]",
-            a.borrow()
-                .iter()
-                .map(|x| render_nested(&x.borrow()))
-                .collect::<Vec<_>>()
-                .join(" ")
+            a.iter().map(render_nested).collect::<Vec<_>>().join(" ")
         ),
         Value::Struct(s) => format!(
             "{{{}}}",
-            s.borrow()
-                .iter()
-                .map(|(k, v)| format!("{k}:{}", render_nested(&v.borrow())))
+            s.iter()
+                .map(|(k, v)| format!("{k}:{}", render_nested(v)))
                 .collect::<Vec<_>>()
                 .join(" ")
         ),
@@ -842,7 +1050,10 @@ fn render(v: &Value) -> String {
 fn render_nested(v: &Value) -> String {
     match v {
         Value::Str(value) => json_string(value),
-        Value::Ref(cell) => render_nested(&cell.borrow()),
+        Value::Ref(loc) => match deref(&loc.root, &loc.path) {
+            Ok(value) => render_nested(&value),
+            Err(_) => "null".into(),
+        },
         Value::Array(_) | Value::Struct(_) => render(v),
         _ => render(v),
     }
@@ -857,24 +1068,18 @@ fn is_location(e: &Expr) -> bool {
     )
 }
 
-fn location(e: &Expr, env: &EnvRef) -> Result<Cell, Error> {
+fn location(e: &Expr, env: &EnvRef) -> Result<(Cell, Vec<PathStep>), Error> {
     match &e.kind {
-        ExprKind::Symbol(n) => lookup(env, n).ok_or_else(|| Error::Name(n.clone())),
+        ExprKind::Symbol(n) => Ok((
+            lookup(env, n).ok_or_else(|| Error::Name(n.clone()))?,
+            Vec::new(),
+        )),
         ExprKind::Field(base, key) => {
-            let c = follow(location(base, env)?)?;
-            let result = match &*c.borrow() {
-                Value::Struct(s) => s
-                    .borrow()
-                    .iter()
-                    .find(|(k, _)| k == key)
-                    .map(|(_, v)| v.clone())
-                    .ok_or_else(|| Error::Name(format!("field {key}"))),
-                _ => Err(Error::Type("struct field access requires a struct".into())),
-            };
-            result
+            let (root, mut steps) = location(base, env)?;
+            steps.push(PathStep::Field(key.clone()));
+            Ok((root, steps))
         }
         ExprKind::Index(base, IndexSpec::Selector(selector)) => {
-            let c = follow(location(base, env)?)?;
             let index = match eval(selector, env, 0, 0).map_err(flow_err)? {
                 Value::Int(index) => index,
                 Value::Array(_) => {
@@ -884,21 +1089,9 @@ fn location(e: &Expr, env: &EnvRef) -> Result<Cell, Error> {
                 }
                 _ => return Err(Error::Type("array index must be an integer".into())),
             };
-            let result = match &*c.borrow() {
-                Value::Array(array) => {
-                    let array = array.borrow();
-                    array
-                        .get(collection_position(
-                            &Value::Int(index),
-                            array.len(),
-                            "array",
-                        )?)
-                        .cloned()
-                        .ok_or_else(|| Error::Name(format!("array index {index} out of bounds")))
-                }
-                _ => Err(Error::Type("indexing requires an array".into())),
-            };
-            result
+            let (root, mut steps) = location(base, env)?;
+            steps.push(PathStep::Index(index));
+            Ok((root, steps))
         }
         ExprKind::Index(_, IndexSpec::Range(_, _)) => {
             Err(Error::Type("a slice cannot be a reference target".into()))
@@ -923,42 +1116,43 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
             Literal::Float(n) => Value::Float(*n),
             Literal::Str(s) => Value::Str(s.clone()),
         }),
-        ExprKind::Symbol(n) => lookup(env, n)
-            .map(|c| copy(&c.borrow()))
-            .ok_or_else(|| Flow::Error(Error::Name(n.clone()))),
-        ExprKind::Field(_, _) => location(e, env)
-            .map(|c| copy(&c.borrow()))
-            .map_err(Into::into),
+        ExprKind::Symbol(n) => {
+            let cell = lookup(env, n).ok_or_else(|| Flow::Error(Error::Name(n.clone())))?;
+            deref(&cell, &[]).map_err(Into::into)
+        }
+        ExprKind::Field(_, _) => {
+            let (root, path) = location(e, env).map_err(Flow::Error)?;
+            deref(&root, &path).map_err(Flow::Error)
+        }
         ExprKind::Index(target, spec) => {
             // Location-shaped bases (a variable, field, or nested index)
-            // resolve straight to their cell so only the selected element is
-            // copied out — never the whole collection first. Non-location
-            // bases (e.g. a call result) still evaluate to a value.
+            // resolve straight to their location so the selector applies to
+            // the value there without evaluating the base to a copy first.
+            // Non-location bases (e.g. a call result) still evaluate to a
+            // value. Either way the result is an O(1) shallow clone: Model P
+            // snapshots are immutable, so reads never deep-copy.
             if matches!(spec, IndexSpec::Selector(_)) && is_location(target) {
-                let base = follow(location(target, env)?).map_err(Flow::Error)?;
-                let value = base.borrow().clone();
+                let (root, path) = location(target, env).map_err(Flow::Error)?;
+                let value = deref(&root, &path).map_err(Flow::Error)?;
                 apply_index(value, spec, env, loop_depth, match_depth)
             } else {
                 let value = eval(target, env, loop_depth, match_depth)?;
                 apply_index(value, spec, env, loop_depth, match_depth)
             }
         }
-        ExprKind::Ref(x) => location(x, env).map(Value::Ref).map_err(Into::into),
+        ExprKind::Ref(x) => location(x, env)
+            .map(|(root, path)| Value::Ref(Rc::new(RefLocation { root, path })))
+            .map_err(Into::into),
         ExprKind::Array(xs) => {
-            let mut v = vec![];
+            let mut v = Vec::with_capacity(xs.len());
             for x in xs {
-                v.push(Rc::new(RefCell::new(eval(
-                    x,
-                    env,
-                    loop_depth,
-                    match_depth,
-                )?)))
+                v.push(eval(x, env, loop_depth, match_depth)?);
             }
-            Ok(Value::Array(Rc::new(RefCell::new(v))))
+            Ok(Value::Array(Rc::new(v)))
         }
         ExprKind::Struct(xs) => {
             let mut seen = HashSet::new();
-            let mut v = vec![];
+            let mut v = Vec::with_capacity(xs.len());
             for field in xs {
                 if !seen.insert(&field.key) {
                     LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(field.span));
@@ -966,15 +1160,10 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
                 }
                 v.push((
                     field.key.clone(),
-                    Rc::new(RefCell::new(eval(
-                        &field.value,
-                        env,
-                        loop_depth,
-                        match_depth,
-                    )?)),
-                ))
+                    eval(&field.value, env, loop_depth, match_depth)?,
+                ));
             }
-            Ok(Value::Struct(Rc::new(RefCell::new(v))))
+            Ok(Value::Struct(Rc::new(v)))
         }
         ExprKind::Block(xs) => {
             let child = new_env(Some(env.clone()));
@@ -999,60 +1188,51 @@ fn apply_index(
         IndexSpec::Range(_, _) => Value::Null,
     };
     match value {
-        Value::Array(array) => {
-            let values = array.borrow();
-            match spec {
-                IndexSpec::Selector(_) => {
-                    if let Value::Array(indices) = selector {
-                        let indices = indices.borrow();
-                        let mut selected = Vec::with_capacity(indices.len());
-                        for index in indices.iter() {
-                            let position =
-                                collection_position(&index.borrow(), values.len(), "array")?;
-                            selected.push(Rc::new(RefCell::new(copy(&values[position].borrow()))));
-                        }
-                        Ok(Value::Array(Rc::new(RefCell::new(selected))))
-                    } else {
-                        let position = collection_position(&selector, values.len(), "array")?;
-                        Ok(copy(&values[position].borrow()))
+        Value::Array(values) => match spec {
+            IndexSpec::Selector(_) => {
+                if let Value::Array(indices) = selector {
+                    let mut selected = Vec::with_capacity(indices.len());
+                    for index in indices.iter() {
+                        let position = collection_position(index, values.len(), "array")?;
+                        selected.push(deref_value(values[position].clone())?);
                     }
-                }
-                IndexSpec::Range(start, end) => {
-                    let Some((start, end)) = range_positions(
-                        start,
-                        end,
-                        env,
-                        loop_depth,
-                        match_depth,
-                        values.len(),
-                        "array",
-                    )?
-                    else {
-                        return Ok(Value::Array(Rc::new(RefCell::new(Vec::new()))));
-                    };
-                    let selected = values[start..=end]
-                        .iter()
-                        .map(|cell| Rc::new(RefCell::new(copy(&cell.borrow()))))
-                        .collect();
-                    Ok(Value::Array(Rc::new(RefCell::new(selected))))
+                    Ok(Value::Array(Rc::new(selected)))
+                } else {
+                    let position = collection_position(&selector, values.len(), "array")?;
+                    deref_value(values[position].clone()).map_err(Into::into)
                 }
             }
-        }
+            IndexSpec::Range(start, end) => {
+                let Some((start, end)) = range_positions(
+                    start,
+                    end,
+                    env,
+                    loop_depth,
+                    match_depth,
+                    values.len(),
+                    "array",
+                )?
+                else {
+                    return Ok(Value::Array(Rc::new(Vec::new())));
+                };
+                let selected = values[start..=end]
+                    .iter()
+                    .map(|value| deref_value(value.clone()))
+                    .collect::<Result<Vec<_>, Error>>()?;
+                Ok(Value::Array(Rc::new(selected)))
+            }
+        },
         Value::Str(string) => {
             let graphemes: Vec<&str> = string.graphemes(true).collect();
             match spec {
                 IndexSpec::Selector(_) => {
                     if let Value::Array(indices) = selector {
-                        let indices = indices.borrow();
                         let mut selected = Vec::with_capacity(indices.len());
                         for index in indices.iter() {
-                            let position =
-                                collection_position(&index.borrow(), graphemes.len(), "string")?;
-                            selected.push(Rc::new(RefCell::new(Value::Str(
-                                graphemes[position].to_owned(),
-                            ))));
+                            let position = collection_position(index, graphemes.len(), "string")?;
+                            selected.push(Value::Str(graphemes[position].to_owned()));
                         }
-                        Ok(Value::Array(Rc::new(RefCell::new(selected))))
+                        Ok(Value::Array(Rc::new(selected)))
                     } else {
                         let position = collection_position(&selector, graphemes.len(), "string")?;
                         Ok(Value::Str(graphemes[position].to_owned()))
@@ -1774,16 +1954,20 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
             }
             "set" => {
                 need(args, 2, "set")?;
-                let c = location(&args[0], env).map_err(Flow::Error)?;
+                let loc = location(&args[0], env).map_err(Flow::Error)?;
                 let v = eval(&args[1], env, l, m)?;
-                let c = follow(c).map_err(Flow::Error)?;
-                // A cycle needs an alias somewhere in the assigned value;
-                // plain literals and copies marshal fresh cells, so the graph
-                // walk only runs when a Value::Ref is actually present.
-                if value_contains_ref(&v) && value_references_cell(&v, &c) {
+                // Resolve the write target first: aliases on the way to the
+                // position are written through, so a cycle check against the
+                // raw location would miss chains that land on it.
+                let (root, path, _) = terminal_location(loc.0, loc.1).map_err(Flow::Error)?;
+                // A cycle needs an alias in the assigned value pointing back
+                // at the location being written; plain literals and snapshots
+                // only marshal fresh values, so the walk runs only when a
+                // Value::Ref is actually present.
+                if value_contains_ref(&v) && creates_cycle(&v, &root, &path) {
                     return Err(Error::Type("cyclic reference".into()).into());
                 }
-                *c.borrow_mut() = v;
+                assign_to(root, path, v).map_err(Flow::Error)?;
                 return Ok(Value::Null);
             }
             "if" => {
@@ -2037,18 +2221,15 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
 }
 fn invoke_operator(value: Value, vals: Vec<Value>, call_span: Span) -> EResult {
     if let Value::Struct(fields) = &value {
-        if fields.borrow().iter().any(|(key, _)| key == "_")
-            && fields.borrow().iter().any(|(key, _)| key == "spec")
-        {
+        if fields.iter().any(|(key, _)| key == "_") && fields.iter().any(|(key, _)| key == "spec") {
             if let Err(error) = validate_descriptor(fields, &vals) {
                 LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
                 return Err(error.into());
             }
             let call = fields
-                .borrow()
                 .iter()
                 .find(|(key, _)| key == "_")
-                .map(|(_, cell)| copy(&cell.borrow()))
+                .map(|(_, v)| v.clone())
                 .expect("descriptor pair guarantees a _ field");
             return invoke(call, vals, call_span);
         }
@@ -2059,8 +2240,8 @@ fn validate_module(value: &Value) -> Result<(), Error> {
     let Value::Struct(fields) = value else {
         return Err(Error::Type("module must be a struct".into()));
     };
-    for (_, cell) in fields.borrow().iter() {
-        let Value::Struct(descriptor) = cell.borrow().clone() else {
+    for (_, v) in fields.iter() {
+        let Value::Struct(descriptor) = v.clone() else {
             return Err(Error::Type(
                 "module members must be callable descriptors".into(),
             ));
@@ -2070,55 +2251,38 @@ fn validate_module(value: &Value) -> Result<(), Error> {
     Ok(())
 }
 fn validate_descriptor_spec(
-    fields: &Rc<RefCell<Vec<(String, Cell)>>>,
+    fields: &Rc<Vec<(String, Value)>>,
 ) -> Result<(usize, Vec<String>), Error> {
     // This runs on every descriptor call, while module members were already
-    // validated once at `use` time — so read the spec by borrowing its cells
-    // in place instead of deep-copying each field: copy() allocates a fresh
-    // cell/struct/array for every check on every call. The checks and error
-    // messages below are unchanged; only the copies are gone. The spec's
-    // cells are never mutated while validating, so holding the borrow across
-    // the lookups is safe.
-    let field_cell = |name: &str| {
-        fields
-            .borrow()
-            .iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, cell)| cell.clone())
-    };
-    match field_cell("_") {
-        Some(cell) if is_callable(&cell.borrow()) => {}
+    // validated once at `use` time — so read the spec in place instead of
+    // deep-copying each field. The checks and error messages below are
+    // unchanged; only the work is gone.
+    let field = |name: &str| fields.iter().find(|(key, _)| key == name).map(|(_, v)| v);
+    match field("_") {
+        Some(v) if is_callable(v) => {}
         Some(_) => return Err(Error::Type("module descriptor _ must be callable".into())),
         None => return Err(Error::Type("module descriptor must contain _".into())),
     }
-    let spec = match field_cell("spec") {
-        Some(cell) => match &*cell.borrow() {
-            Value::Struct(spec) => spec.clone(),
-            _ => {
-                return Err(Error::Type(
-                    "module descriptor spec must be a struct".into(),
-                ))
-            }
-        },
+    let spec = match field("spec") {
+        Some(Value::Struct(spec)) => spec.clone(),
+        Some(_) => {
+            return Err(Error::Type(
+                "module descriptor spec must be a struct".into(),
+            ))
+        }
         None => {
             return Err(Error::Type(
                 "module descriptor must contain a spec field".into(),
             ))
         }
     };
-    let spec_borrow = spec.borrow();
-    let spec_field = |name: &str| {
-        spec_borrow
-            .iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, cell)| cell.borrow())
-    };
-    if !matches!(spec_field("documentation").as_deref(), Some(Value::Str(_))) {
+    let spec_field = |name: &str| spec.iter().find(|(key, _)| key == name).map(|(_, v)| v);
+    if !matches!(spec_field("documentation"), Some(Value::Str(_))) {
         return Err(Error::Type(
             "module descriptor spec.documentation must be a string".into(),
         ));
     }
-    let arity = match spec_field("arity").as_deref() {
+    let arity = match spec_field("arity") {
         Some(Value::Int(arity)) if *arity >= 0 => *arity as usize,
         _ => {
             return Err(Error::Type(
@@ -2126,12 +2290,11 @@ fn validate_descriptor_spec(
             ))
         }
     };
-    let types = match spec_field("type").as_deref() {
+    let types = match spec_field("type") {
         Some(Value::Null) if arity == 0 => Vec::new(),
         Some(Value::Array(types)) if arity > 0 => types
-            .borrow()
             .iter()
-            .map(|cell| match &*cell.borrow() {
+            .map(|value| match value {
                 Value::Str(value) => Ok(value.clone()),
                 _ => Err(Error::Type(
                     "module descriptor spec.type entries must be strings".into(),
@@ -2149,20 +2312,14 @@ fn validate_descriptor_spec(
             "module descriptor spec.type length must match spec.arity".into(),
         ));
     }
-    if !matches!(
-        spec_field("return").as_deref(),
-        Some(Value::Null | Value::Array(_))
-    ) {
+    if !matches!(spec_field("return"), Some(Value::Null | Value::Array(_))) {
         return Err(Error::Type(
             "module descriptor spec.return must be an array or null".into(),
         ));
     }
     Ok((arity, types))
 }
-fn validate_descriptor(
-    fields: &Rc<RefCell<Vec<(String, Cell)>>>,
-    vals: &[Value],
-) -> Result<(), Error> {
+fn validate_descriptor(fields: &Rc<Vec<(String, Value)>>, vals: &[Value]) -> Result<(), Error> {
     let (arity, types) = validate_descriptor_spec(fields)?;
     if vals.len() != arity {
         return Err(Error::Arity(format!(
@@ -2609,23 +2766,15 @@ pub(crate) fn json_render(v: &Value) -> Result<String, Error> {
             "FormatTypeError: %j cannot encode non-finite float".into(),
         )),
         Value::Str(value) => Ok(json_string(value)),
-        Value::Ref(cell) => json_render(&cell.borrow()),
+        Value::Ref(loc) => json_render(&deref(&loc.root, &loc.path)?),
         Value::Array(values) => values
-            .borrow()
             .iter()
-            .map(|value| json_render(&value.borrow()))
+            .map(json_render)
             .collect::<Result<Vec<_>, _>>()
             .map(|values| format!("[{}]", values.join(","))),
         Value::Struct(fields) => fields
-            .borrow()
             .iter()
-            .map(|(key, value)| {
-                Ok(format!(
-                    "{}:{}",
-                    json_string(key),
-                    json_render(&value.borrow())?
-                ))
-            })
+            .map(|(key, value)| Ok(format!("{}:{}", json_string(key), json_render(value)?)))
             .collect::<Result<Vec<_>, Error>>()
             .map(|fields| format!("{{{}}}", fields.join(","))),
         Value::Function(_) => Err(Error::Format(
@@ -2670,7 +2819,7 @@ fn lisp_string(value: &str) -> String {
 fn lisp_quoted(v: &Value) -> Result<String, Error> {
     match v {
         Value::Str(text) => Ok(lisp_string(text)),
-        Value::Ref(cell) => lisp_quoted(&cell.borrow()),
+        Value::Ref(loc) => lisp_quoted(&deref(&loc.root, &loc.path)?),
         _ => Err(Error::Format("FormatTypeError: %q expects string".into())),
     }
 }
@@ -2681,17 +2830,15 @@ fn lisp_source(v: &Value) -> Result<String, Error> {
         Value::Int(x) => Ok(x.to_string()),
         Value::Float(x) => Ok(float_source(*x)),
         Value::Str(x) => Ok(lisp_string(x)),
-        Value::Ref(cell) => lisp_source(&cell.borrow()),
+        Value::Ref(loc) => lisp_source(&deref(&loc.root, &loc.path)?),
         Value::Array(items) => items
-            .borrow()
             .iter()
-            .map(|item| lisp_source(&item.borrow()))
+            .map(lisp_source)
             .collect::<Result<Vec<_>, Error>>()
             .map(|items| format!("[{}]", items.join(" "))),
         Value::Struct(fields) => fields
-            .borrow()
             .iter()
-            .map(|(key, value)| Ok(format!("{key}:{}", lisp_source(&value.borrow())?)))
+            .map(|(key, value)| Ok(format!("{key}:{}", lisp_source(value)?)))
             .collect::<Result<Vec<_>, Error>>()
             .map(|fields| format!("{{{}}}", fields.join(" "))),
         Value::Function(_) | Value::NativeFunction(_) => Err(Error::Format(
@@ -2706,22 +2853,23 @@ fn debug_render(v: &Value) -> String {
         Value::Int(value) => format!("Int({value})"),
         Value::Float(value) => format!("Float({value:?})"),
         Value::Str(value) => format!("Str({value:?})"),
-        Value::Ref(cell) => format!("Ref({})", debug_render(&cell.borrow())),
+        Value::Ref(loc) => match deref(&loc.root, &loc.path) {
+            Ok(value) => format!("Ref({})", debug_render(&value)),
+            Err(_) => "Ref(<invalid>)".into(),
+        },
         Value::Array(values) => format!(
             "Array([{}])",
             values
-                .borrow()
                 .iter()
-                .map(|value| debug_render(&value.borrow()))
+                .map(debug_render)
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
         Value::Struct(fields) => format!(
             "Struct({{{}}})",
             fields
-                .borrow()
                 .iter()
-                .map(|(key, value)| format!("{key}: {}", debug_render(&value.borrow())))
+                .map(|(key, value)| format!("{key}: {}", debug_render(value)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -2964,17 +3112,20 @@ fn flow_err(f: Flow) -> Error {
     }
 }
 fn equals(a: &Value, b: &Value) -> bool {
-    let a = if let Value::Ref(c) = a {
-        let x = c.borrow();
-        return equals(&x, b);
-    } else {
-        a
+    let a = match a {
+        Value::Ref(loc) => match deref(&loc.root, &loc.path) {
+            Ok(value) => return equals(&value, b),
+            // A stale reference resolves to nothing and equals nothing.
+            Err(_) => return false,
+        },
+        other => other,
     };
-    let b = if let Value::Ref(c) = b {
-        let x = c.borrow();
-        return equals(a, &x);
-    } else {
-        b
+    let b = match b {
+        Value::Ref(loc) => match deref(&loc.root, &loc.path) {
+            Ok(value) => return equals(a, &value),
+            Err(_) => return false,
+        },
+        other => other,
     };
     match (a, b) {
         (Value::Null, Value::Null) => true,
@@ -2986,21 +3137,14 @@ fn equals(a: &Value, b: &Value) -> bool {
         (Value::Function(x), Value::Function(y)) => Rc::ptr_eq(x, y),
         (Value::NativeFunction(x), Value::NativeFunction(y)) => Rc::ptr_eq(x, y),
         (Value::Array(x), Value::Array(y)) => {
-            let x = x.borrow();
-            let y = y.borrow();
-            x.len() == y.len()
-                && x.iter()
-                    .zip(y.iter())
-                    .all(|(a, b)| equals(&a.borrow(), &b.borrow()))
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(a, b)| equals(a, b))
         }
         (Value::Struct(x), Value::Struct(y)) => {
-            let x = x.borrow();
-            let y = y.borrow();
             x.len() == y.len()
                 && x.iter().all(|(k, v)| {
                     y.iter()
                         .find(|(q, _)| q == k)
-                        .is_some_and(|(_, w)| equals(&v.borrow(), &w.borrow()))
+                        .is_some_and(|(_, w)| equals(v, w))
                 })
         }
         _ => false,

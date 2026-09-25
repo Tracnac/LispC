@@ -46,52 +46,52 @@ thread_local! {
 }
 
 pub fn module() -> Value {
-    Value::Struct(Rc::new(RefCell::new(vec![
+    Value::Struct(Rc::new(vec![
         (
             "open".to_owned(),
-            Rc::new(RefCell::new(descriptor(
+            descriptor(
                 "io.open",
                 open,
                 "Open a file URI using its mode query parameter.",
                 1,
                 &["string"],
                 &["int"],
-            ))),
+            ),
         ),
         (
             "read".to_owned(),
-            Rc::new(RefCell::new(descriptor(
+            descriptor(
                 "io.read",
                 read,
                 "Read one line from a file descriptor.",
                 1,
                 &["int"],
                 &["string"],
-            ))),
+            ),
         ),
         (
             "write".to_owned(),
-            Rc::new(RefCell::new(descriptor(
+            descriptor(
                 "io.write",
                 write,
                 "Write a string to a file descriptor.",
                 2,
                 &["int", "string"],
                 &["int"],
-            ))),
+            ),
         ),
         (
             "close".to_owned(),
-            Rc::new(RefCell::new(descriptor(
+            descriptor(
                 "io.close",
                 close,
                 "Close a file descriptor.",
                 1,
                 &["int"],
                 &["bool"],
-            ))),
+            ),
         ),
-    ])))
+    ]))
 }
 
 fn descriptor(
@@ -103,31 +103,29 @@ fn descriptor(
     returns: &[&str],
 ) -> Value {
     let values = |items: &[&str]| {
-        Value::Array(Rc::new(RefCell::new(
+        Value::Array(Rc::new(
             items
                 .iter()
-                .map(|item| Rc::new(RefCell::new(Value::Str((*item).to_owned()))))
+                .map(|item| Value::Str((*item).to_owned()))
                 .collect(),
-        )))
+        ))
     };
-    let spec = Value::Struct(Rc::new(RefCell::new(vec![
+    let spec = Value::Struct(Rc::new(vec![
         (
             "documentation".to_owned(),
-            Rc::new(RefCell::new(Value::Str(documentation.to_owned()))),
+            Value::Str(documentation.to_owned()),
         ),
-        ("arity".to_owned(), Rc::new(RefCell::new(Value::Int(arity)))),
-        ("type".to_owned(), Rc::new(RefCell::new(values(types)))),
-        ("return".to_owned(), Rc::new(RefCell::new(values(returns)))),
-    ])));
-    Value::Struct(Rc::new(RefCell::new(vec![
+        ("arity".to_owned(), Value::Int(arity)),
+        ("type".to_owned(), values(types)),
+        ("return".to_owned(), values(returns)),
+    ]));
+    Value::Struct(Rc::new(vec![
         (
             "_".to_owned(),
-            Rc::new(RefCell::new(Value::NativeFunction(Rc::new(
-                NativeFunction { name, call },
-            )))),
+            Value::NativeFunction(Rc::new(NativeFunction { name, call })),
         ),
-        ("spec".to_owned(), Rc::new(RefCell::new(spec))),
-    ])))
+        ("spec".to_owned(), spec),
+    ]))
 }
 
 fn open(args: Vec<Value>) -> Result<Value, Error> {

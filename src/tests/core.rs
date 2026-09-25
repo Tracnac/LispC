@@ -151,7 +151,10 @@ fn references_are_not_callable() {
         env: new_env(None),
         name: None,
     }));
-    assert!(!is_callable(&Value::Ref(Rc::new(RefCell::new(function)))));
+    assert!(!is_callable(&Value::Ref(Rc::new(RefLocation {
+        root: Rc::new(RefCell::new(function)),
+        path: vec![],
+    }))));
 }
 
 #[test]
@@ -177,6 +180,58 @@ fn cyclic_references_are_reported_as_lisp_errors() {
 fn aliasing_outside_of_the_referenced_collection_is_not_cyclic() {
     assert!(run("(let a [1 2]) (set a[2] (^ a[1])) a").is_ok());
     assert!(run("(let a [1 2]) (let b [3 4]) (set a[1] (^ b[1])) a").is_ok());
+}
+
+#[test]
+fn stale_references_are_rejected_not_snapshots() {
+    // Model P: a Ref identifies a logical location (root cell + path), never
+    // an intermediate node's current cell. Replacing the whole value at the
+    // root therefore invalidates element/field aliases; resolving one must
+    // fail deterministically — and must never expose the old element.
+    assert!(matches!(
+        run("(let a [1 2]) (let p (^ a[1])) (set a 5) p"),
+        Err(Error::Type(message)) if message == "indexing requires an array"
+    ));
+    assert!(matches!(
+        run(r#"(let a [{name:"Alice"}]) (let p (^ a[1].name)) (set a 42) p"#),
+        Err(Error::Type(message)) if message == "indexing requires an array"
+    ));
+    // Reading through a reference that WALKS back up to a still-valid element
+    // survives (the location exists again); only resolving must be exact.
+    check(
+        "(let a [1 2]) (let p (^ a[1])) (set a [9 8 7]) (expect p 9) t",
+        "t",
+    );
+    // Renderers degrade to placeholders; fallible serializers propagate the
+    // deref failure instead of printing stale data.
+    let stale = Value::Ref(Rc::new(RefLocation {
+        root: Rc::new(RefCell::new(Value::Int(5))),
+        path: vec![PathStep::Index(1)],
+    }));
+    assert_eq!(render(&stale), "<invalid reference>");
+    assert_eq!(render_nested(&stale), "null");
+    assert_eq!(debug_render(&stale), "Ref(<invalid>)");
+    assert!(lisp_source(&stale).is_err());
+    assert!(json_render(&stale).is_err());
+    // equals: a stale reference resolves to nothing and equals nothing.
+    assert!(!equals(&stale, &Value::Int(5)));
+}
+
+#[test]
+fn writes_write_through_intermediates_and_replace_at_the_leaf() {
+    // Write-through at an intermediate position: a[1] holds an alias to b, so
+    // a[1][2] writes b[2] while a keeps the alias.
+    check(
+        "(let a [1 2]) (let b [3 4]) (set a[1] (^ b)) (set a[1][2] 9) (expect b [3 9]) (expect a[1] [3 9]) t",
+        "t",
+    );
+    // Replace-at-leaf: writing to a position that currently holds an alias
+    // replaces that alias itself (it is a normal value), it does not write
+    // through — the referenced location is untouched.
+    check(
+        "(let a [1 2]) (let b [9]) (set a[1] (^ b[1])) (set a[1] 7) (expect a[1] 7) (expect b [9]) t",
+        "t",
+    );
 }
 
 #[test]

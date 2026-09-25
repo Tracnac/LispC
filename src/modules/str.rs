@@ -1,26 +1,18 @@
-use std::{cell::RefCell, rc::Rc};
+use std::rc::Rc;
 
 use super::super::{Error, NativeFunction, Value};
 
 pub fn module() -> Value {
-    Value::Struct(Rc::new(RefCell::new(vec![
+    Value::Struct(Rc::new(vec![
         (
             "upper".to_owned(),
-            Rc::new(RefCell::new(descriptor(
-                "str.upper",
-                upper,
-                "Convert a string to uppercase.",
-            ))),
+            descriptor("str.upper", upper, "Convert a string to uppercase."),
         ),
         (
             "lower".to_owned(),
-            Rc::new(RefCell::new(descriptor(
-                "str.lower",
-                lower,
-                "Convert a string to lowercase.",
-            ))),
+            descriptor("str.lower", lower, "Convert a string to lowercase."),
         ),
-    ])))
+    ]))
 }
 
 fn descriptor(
@@ -28,27 +20,23 @@ fn descriptor(
     call: fn(Vec<Value>) -> Result<Value, Error>,
     documentation: &'static str,
 ) -> Value {
-    let types = Value::Array(Rc::new(RefCell::new(vec![Rc::new(RefCell::new(
-        Value::Str("string".to_owned()),
-    ))])));
-    let returns = Value::Array(Rc::new(RefCell::new(vec![Rc::new(RefCell::new(
-        Value::Str("string".to_owned()),
-    ))])));
-    let spec = Value::Struct(Rc::new(RefCell::new(vec![
+    let types = Value::Array(Rc::new(vec![Value::Str("string".to_owned())]));
+    let returns = Value::Array(Rc::new(vec![Value::Str("string".to_owned())]));
+    let spec = Value::Struct(Rc::new(vec![
         (
             "documentation".to_owned(),
-            Rc::new(RefCell::new(Value::Str(documentation.to_owned()))),
+            Value::Str(documentation.to_owned()),
         ),
-        ("arity".to_owned(), Rc::new(RefCell::new(Value::Int(1)))),
-        ("type".to_owned(), Rc::new(RefCell::new(types))),
-        ("return".to_owned(), Rc::new(RefCell::new(returns))),
-    ])));
+        ("arity".to_owned(), Value::Int(1)),
+        ("type".to_owned(), types),
+        ("return".to_owned(), returns),
+    ]));
     let native = Value::NativeFunction(Rc::new(NativeFunction { name, call }));
 
-    Value::Struct(Rc::new(RefCell::new(vec![
-        ("_".to_owned(), Rc::new(RefCell::new(native))),
-        ("spec".to_owned(), Rc::new(RefCell::new(spec))),
-    ])))
+    Value::Struct(Rc::new(vec![
+        ("_".to_owned(), native),
+        ("spec".to_owned(), spec),
+    ]))
 }
 
 fn string_argument(args: Vec<Value>) -> Result<String, Error> {
