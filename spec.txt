@@ -361,12 +361,31 @@ Interpréteur tree-walking en Rust (parse → AST → eval récursif).
 * `(repl)` est une forme spéciale qui suspend le programme à l'endroit exact de l'appel et ouvre
   une session interactive : chaque ligne est évaluée comme un programme Lisp dans un scope
   enfant jetable, avec les mêmes profondeurs loop/match que l'appel.
-* `(repl "label")` fixe l'invite (`label> ` au lieu de `repl> `).
+* `(repl "label")` donne un nom à la session. L'invite est contextuelle : `repl> ` à la racine
+  sans contexte, sinon `fichier:ligne> ` (ou `label@fichier:ligne> ` avec un label), où la ligne
+  est celle du point d'exécution (le `(repl)` courant) dans la source réelle du programme — même
+  si une ligne de shebang a été retirée avant l'analyse.
 * Lignes : tout ce qui ne commence pas par `:` est évalué ; le résultat de la dernière forme
   (s'il n'est pas `_`) est affiché sur stdout au format lisp.
 * Commandes (`:` en tête) : `:c`/`:continue` reprend le programme, `:q`/`:quit` l'abandonne
   (erreur `Quit`, seul cas où la session stoppe le programme), `:h`/`:help` liste les commandes.
-  EOF sur l'entrée quitte la session comme `:c`.
+  EOF sur l'entrée quitte la session comme `:c`. Comme dans l'évaluateur, `:c`/`:q`/`:h`
+  n'acceptent pas d'argument (un argument → « commande inconnue »).
+* Débogage : `:l`/`:list [N]` affiche les lignes autour du point d'exécution dans sa source
+  (défaut ±3, `:l N` règle la fenêtre, `:l 0` = ligne courante seulement), en-tête
+  `@ fichier:ligne (execution point)` et ligne courante marquée `>`. `:i`/`:inspect` liste les
+  liaisons effectives : chaque nom une fois (le plus interne gagne), ordre alphabétique,
+  valeur tronquée, `*` si le nom a aussi une liaison externe (ombragée), en-tête « N bindings
+  across M scopes » ; `:i nom` affiche la valeur complète, le type, le scope de liaison
+  (session/englobant/externe), la chaîne d'ombrage (liaisons externes successives, les plus
+  internes d'abord) et, pour une fonction, `def: fichier:ligne` quand sa source est résolvable
+  (sinon « defined in this session (repl) »). `:bt`/`:backtrace` affiche la pile d'appels
+  vivante, cadre le plus interne d'abord, sous la forme `nom at fichier:ligne:col (texte)`;
+  vide si `(repl)` est au niveau top-level.
+* Pistes de source : la source en cours d'évaluation (fichier du programme, `(eval …)`, chaque
+  ligne de session) est enregistrée avec son étiquette, son texte et le décalage de lignes éventuel
+  (shebang), ce qui permet à `:l`/`:i`/`:bt` de résoudre les positions ; les fonctions définies
+  dans la session sont signalées comme telles.
 * Scope enfant : `let` ne lie que dans la session (aucune trace après `:c`) ; `set` et les
   lectures atteignent l'état vivant du programme. Les erreurs d'une ligne sont affichées
   (fichier `<repl>`, ligne 1, colonne pointée) et la session continue : elles ne se propagent
@@ -377,4 +396,7 @@ Interpréteur tree-walking en Rust (parse → AST → eval récursif).
   programme n'est jamais consommé par la session, même quand le programme est chargé depuis
   stdin (`cat prog.lisp | small-lisp`) ; `io.read 0` continue de lire le stdin d'origine. Sans
   terminal de contrôle, `(repl)` échoue avec IOError — pas de repli silencieux sur stdin.
-* Ctrl-C reste intercepté : `Interrupted` abandonne le run, y compris pendant une session.
+* Ctrl-C pendant une session : la ligne en cours est annulée, un message
+  « repl: interrupted (:c continues, :q quits) » est affiché et la session continue. L'état
+  Ctrl-C antérieur à la session est restauré à la sortie : un Ctrl-C après `:c` abandonne donc
+  toujours le run comme avant. Hors session, Ctrl-C continue d'abandonner le run (`Interrupted`).

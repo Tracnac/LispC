@@ -22,6 +22,16 @@ Feature
   terminal (/dev/tty), so program stdin stays untouched even when the program is piped in;
   without a tty it fails with IOError (no stdin fallback). Tests use the REPL_INPUT hook.
 
+- Resolved: REPL debugging commands — `:l`/`:list [N]` (source window ±3 around the execution
+  point, `:l 0` = current line only), `:i`/`:inspect` (effective binding table with shadow
+  `*` marks) and `:i name` (value, type, scope, shadow chain, `def: file:line` for
+  functions), `:bt`/`:backtrace` (live call stack innermost-first with file:line:col). An
+  EVAL_SOURCES thread-local registry (pushed/popped at every evaluation boundary: program
+  file with shebang offset, `(eval …)`, each REPL line) maps spans back to source, enabling
+  the context prompt `file:line> ` / `label@file:line> `. Ctrl-C inside a session cancels
+  the line and stays in the session, restoring the pre-session interrupt state on exit.
+  Tests add the REPL_OUTPUT capture hook and a per-thread REPL_INTERRUPT simulator.
+
 - Resolved: `_` no longer makes arbitrary structs callable, and unwrapping is no longer
   recursive. Only the full descriptor pair `{_: callable spec: ...}` auto-unboxes in operator
   position, exactly one level (invoke_operator); `_` chains/cycles cannot loop because a bare

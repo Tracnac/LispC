@@ -10,11 +10,20 @@ fn run(src: &str) -> Result<Value, Error> {
     let tokens = lex(src)?;
     let program = Parser { ts: tokens, i: 0 }.program()?;
     let env = new_env(None);
-    let mut result = Value::Null;
-    for form in program {
-        result = eval(&form, &env, 0, 0).map_err(flow_err)?;
-    }
-    Ok(result)
+    push_source(SourceCtx {
+        label: "<test>".into(),
+        source: src.to_owned(),
+        line_offset: 0,
+    });
+    let outcome = (|| {
+        let mut result = Value::Null;
+        for form in program {
+            result = eval(&form, &env, 0, 0).map_err(flow_err)?;
+        }
+        Ok(result)
+    })();
+    pop_source();
+    outcome
 }
 
 fn check(src: &str, expected: &str) {

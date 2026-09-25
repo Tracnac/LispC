@@ -76,14 +76,23 @@ session with full access to the live state:
 ```
 
 Every line is evaluated as Lisp in a throwaway child scope: `set` mutates program variables,
-`let` binds only inside the session, and the last non-null result is echoed. Commands —
-`:c`/`:continue` resumes the program, `:q`/`:quit` aborts it, `:h`/`:help` lists commands.
-Errors inside a line are reported without stopping the program, `(break)`/`(continue)` act on
-the enclosing loop, and nested `(repl)` sessions work. The session reads from and writes to the
-process's controlling terminal (`/dev/tty`), so program stdin is never consumed — even
-`cat program.lisp | small-lisp` reaches an interactive session, and `(io.read 0)` keeps reading
-the original stdin. Without a controlling terminal, `(repl)` raises an IO error instead of
-falling back to stdin; EOF on the terminal ends the session like `:c`.
+`let` binds only inside the session, and the last non-null result is echoed. The prompt is
+contextual — `prog.lisp:7> ` pinpoints the `(repl)` call site (`label@prog.lisp:7> ` when the
+session has a label). Commands: `:c`/`:continue` resumes the program, `:q`/`:quit` aborts it,
+`:h`/`:help` lists commands. Debugging commands are resolved against the live program:
+`:l`/`:list [N]` shows the source lines (±3 by default, `:l 0` = the execution line only,
+marked `>`) around the execution point, `:i`/`:inspect` lists the effective bindings in scope
+(`:i name` shows one binding's value, type, binding scope and definition site, with the shadow
+chain when one exists), and `:bt`/`:backtrace` dumps the call stack innermost-first with
+`file:line:col` positions. A Ctrl-C while a session is open cancels the current line and keeps
+you in the session; the pre-session state is restored on resume, so Ctrl-C after `:c` still
+aborts the run. Errors inside a line are reported without stopping the program,
+`(break)`/`(continue)` act on the enclosing loop, and nested `(repl)` sessions work. The
+session reads from and writes to the process's controlling terminal (`/dev/tty`), so program
+stdin is never consumed — even `cat program.lisp | small-lisp` reaches an interactive session,
+and `(io.read 0)` keeps reading the original stdin. Without a controlling terminal, `(repl)`
+raises an IO error instead of falling back to stdin; EOF on the terminal ends the session
+like `:c`.
 
 ## File IO
 

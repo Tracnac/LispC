@@ -142,10 +142,43 @@ thread_local! {
     static CALL_TRACE: RefCell<Vec<(String, Span)>> = const { RefCell::new(Vec::new()) };
     static LAST_TRACE: RefCell<Vec<(String, Span)>> = const { RefCell::new(Vec::new()) };
     static LAST_ERROR_SPAN: RefCell<Option<Span>> = const { RefCell::new(None) };
+    // Sources currently being evaluated, innermost last: lets the REPL commands
+    // :l/:i/:bt map a span (a byte offset) back to file line numbers and source
+    // text. Pushed and popped at every evaluation boundary (program file,
+    // (eval …), each REPL line).
+    static EVAL_SOURCES: RefCell<Vec<SourceCtx>> = const { RefCell::new(Vec::new()) };
     // Test hook: when set, REPL lines are taken from this queue instead of stdin.
     static REPL_INPUT: RefCell<Option<VecDeque<String>>> = const { RefCell::new(None) };
+    // Test hook: when set, REPL console output (prompts, notices, command
+    // output, echoed results) is captured here instead of written to the
+    // terminal.
+    static REPL_OUTPUT: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    // Test hook: a per-thread signal that the REPL session loop treats as
+    // Ctrl-C, so tests can simulate an interrupt deterministically without
+    // racing the process-wide INTERRUPTED flag.
+    static REPL_INTERRUPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// A source text plus how to report positions inside it: its label (a file
+/// path, `<stdin>`, `<test>`, `<eval>` or `<repl>`) and how many leading lines
+/// were stripped before parsing (a shebang), so displayed line numbers match
+/// the original text.
+#[derive(Clone)]
+struct SourceCtx {
+    label: String,
+    source: String,
+    line_offset: usize,
+}
+
+fn push_source(ctx: SourceCtx) {
+    EVAL_SOURCES.with(|sources| sources.borrow_mut().push(ctx));
+}
+fn pop_source() {
+    EVAL_SOURCES.with(|sources| {
+        sources.borrow_mut().pop();
+    });
+}
 
 fn install_sigint_handler() -> Result<(), Error> {
     ctrlc::set_handler(|| {
@@ -1140,7 +1173,14 @@ impl ReplConsole {
     fn echo(&mut self, text: &str) {
         match self {
             ReplConsole::Queued(_) => {
-                let _ = writeln!(io::stdout(), "{text}");
+                REPL_OUTPUT.with(|output| {
+                    let mut capture = output.borrow_mut();
+                    if let Some(lines) = capture.as_mut() {
+                        lines.push(format!("{text}\n"));
+                    } else {
+                        let _ = writeln!(io::stdout(), "{text}");
+                    }
+                });
             }
             ReplConsole::Tty { writer, .. } => {
                 let _ = writeln!(writer, "{text}");
@@ -1153,8 +1193,15 @@ impl ReplConsole {
     fn notify(&mut self, text: &str) {
         match self {
             ReplConsole::Queued(_) => {
-                let _ = write!(io::stderr(), "{text}");
-                let _ = io::stderr().flush();
+                REPL_OUTPUT.with(|output| {
+                    let mut capture = output.borrow_mut();
+                    if let Some(lines) = capture.as_mut() {
+                        lines.push(text.to_owned());
+                    } else {
+                        let _ = write!(io::stderr(), "{text}");
+                        let _ = io::stderr().flush();
+                    }
+                });
             }
             ReplConsole::Tty { writer, .. } => {
                 let _ = writer.write_all(text.as_bytes());
@@ -1178,28 +1225,421 @@ fn repl_diagnostic(error: &Error, line: &str, span: Option<Span>) -> String {
     let caret = format!("{}^", " ".repeat(column.saturating_sub(1)));
     format!("<repl>:1:{column}: {error}\n{line}\n{caret}")
 }
+
+/// What a REPL command asked the session to do.
+enum ReplCommand {
+    /// Resume the program (`:c`/`:continue`).
+    Resume,
+    /// Abort the whole run (`:q`/`:quit`).
+    Quit,
+    /// Print and keep the session open.
+    Stay,
+}
+
+/// Handle one `:`-prefixed REPL line. `command` is the trimmed text after the
+/// colon; like the evaluator, `:c`/`:q`/`:h` keep their exact no-argument
+/// behavior, while `:l`/`:i`/`:bt` accept arguments.
+fn handle_repl_command(
+    command: &str,
+    session: &EnvRef,
+    console: &mut ReplConsole,
+    source: &Option<SourceCtx>,
+    execution_span: Span,
+) -> ReplCommand {
+    let mut words = command.split_whitespace();
+    let cmd = words.next().unwrap_or("");
+    let args: Vec<&str> = words.collect();
+    match cmd {
+        "c" | "continue" if args.is_empty() => ReplCommand::Resume,
+        "q" | "quit" if args.is_empty() => ReplCommand::Quit,
+        "h" | "help" if args.is_empty() => {
+            console.notify(
+                "commands: :c/:continue resume, :q/:quit abort, \
+                 :l/:list [N] show source around the execution point, \
+                 :i/:inspect [name] show the bindings, \
+                 :bt/:backtrace show the call stack, \
+                 :h/:help this help; anything else is evaluated as Lisp\n",
+            );
+            ReplCommand::Stay
+        }
+        "l" | "list" => {
+            let window = match args.len() {
+                0 => Ok(3),
+                1 => args[0].parse::<usize>().map_err(|_| args[0]),
+                _ => {
+                    console.notify(&format!("repl: :{cmd} expects zero or one count\n"));
+                    return ReplCommand::Stay;
+                }
+            };
+            match window {
+                Ok(window) => console.notify(&repl_source_window(source, execution_span, window)),
+                Err(bad) => console.notify(&format!(
+                    "repl: :{cmd} expects a non-negative count, got `{bad}`\n"
+                )),
+            }
+            ReplCommand::Stay
+        }
+        "i" | "inspect" => {
+            match args.len() {
+                0 => console.notify(&repl_binding_table(session)),
+                1 => console.notify(&repl_inspect_binding(session, args[0], source)),
+                _ => console.notify(&format!("repl: :{cmd} expects one name or none (try :h)\n")),
+            }
+            ReplCommand::Stay
+        }
+        "bt" | "backtrace" => {
+            if !args.is_empty() {
+                console.notify(&format!("repl: :{cmd} takes no arguments\n"));
+            } else {
+                console.notify(&repl_backtrace(source));
+            }
+            ReplCommand::Stay
+        }
+        _ => {
+            console.notify(&format!("repl: unknown command `:{command}` (try :h)\n"));
+            ReplCommand::Stay
+        }
+    }
+}
+
+/// Session prompt: `label:line> ` (or `file:line> `) when the execution point
+/// maps to a source line, otherwise `repl> ` / `label> `.
+fn repl_prompt(label: &str, source: &Option<SourceCtx>, execution_span: Span) -> String {
+    let prefix = if label.is_empty() {
+        "repl".to_owned()
+    } else {
+        label.to_owned()
+    };
+    let Some(ctx) = source else {
+        return format!("{prefix}> ");
+    };
+    if execution_span.start >= ctx.source.len() {
+        return format!("{prefix}> ");
+    }
+    let line = line_of(execution_span.start, &ctx.source) + ctx.line_offset;
+    if label.is_empty() {
+        format!("{}:{line}> ", ctx.label)
+    } else {
+        format!("{label}@{}:{line}> ", ctx.label)
+    }
+}
+
+/// A `:l` window: the source lines around the execution point, the
+/// execution-point line marked `>`.
+fn repl_source_window(source: &Option<SourceCtx>, execution_span: Span, window: usize) -> String {
+    let Some(ctx) = source else {
+        return "repl: no source context for the execution point\n".into();
+    };
+    let offset = execution_span.start.min(ctx.source.len());
+    let center = line_of(offset, &ctx.source);
+    let newlines = ctx.source.bytes().filter(|b| *b == b'\n').count();
+    let total = newlines + 1 - usize::from(ctx.source.ends_with('\n'));
+    let first = center.saturating_sub(window).max(1);
+    let last = (center + window).min(total);
+    let width = format!("{}", last + ctx.line_offset).len();
+    let mut out = format!(
+        "@ {}:{} (execution point)\n",
+        ctx.label,
+        center + ctx.line_offset
+    );
+    for line in first..=last {
+        let (start, end) = line_bounds(&ctx.source, line);
+        let text = ctx.source[start..end].trim();
+        let marker = if line == center { ">" } else { " " };
+        out.push_str(&format!(
+            " {marker} {:>width$}  {text}\n",
+            line + ctx.line_offset,
+            width = width
+        ));
+    }
+    out
+}
+
+/// `:i`: the effective binding table across the session's scope chain, each
+/// name once (innermost wins), `*` marking names with an outer duplicate.
+fn repl_binding_table(session: &EnvRef) -> String {
+    let mut scopes: Vec<Vec<(String, Cell)>> = Vec::new();
+    let mut current = Some(session.clone());
+    while let Some(env) = current {
+        let (values, parent) = {
+            let borrow = env.borrow();
+            (borrow.values.clone(), borrow.parent.clone())
+        };
+        scopes.push(values);
+        current = parent;
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut shadowed: HashSet<String> = HashSet::new();
+    let mut rows: Vec<(String, Cell)> = Vec::new();
+    for scope in &scopes {
+        for (name, cell) in scope {
+            if seen.insert(name.clone()) {
+                rows.push((name.clone(), cell.clone()));
+            } else {
+                shadowed.insert(name.clone());
+            }
+        }
+    }
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = format!(
+        "{} binding{} across {} scope{}\n",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" },
+        scopes.len(),
+        if scopes.len() == 1 { "" } else { "s" },
+    );
+    const MAX_ROWS: usize = 200;
+    for (name, cell) in rows.iter().take(MAX_ROWS) {
+        let value = clip(&repl_value(&cell.borrow()), 60);
+        let star = if shadowed.contains(name) { " *" } else { "" };
+        out.push_str(&format!("{name} = {value}{star}\n"));
+    }
+    if rows.len() > MAX_ROWS {
+        out.push_str(&format!("… and {} more bindings\n", rows.len() - MAX_ROWS));
+    }
+    out
+}
+
+/// `:i name`: the value of a binding, its type and scope, the shadow chain
+/// when one exists, and (for functions) where it was defined.
+fn repl_inspect_binding(session: &EnvRef, name: &str, source: &Option<SourceCtx>) -> String {
+    let mut occurrences: Vec<(usize, Cell)> = Vec::new();
+    let mut current = Some(session.clone());
+    let mut depth = 0usize;
+    while let Some(env) = current {
+        let (hit, parent) = {
+            let borrow = env.borrow();
+            let hit = borrow
+                .values
+                .iter()
+                .rev()
+                .find(|(key, _)| key == name)
+                .map(|(_, cell)| cell.clone());
+            (hit, borrow.parent.clone())
+        };
+        if let Some(cell) = hit {
+            occurrences.push((depth, cell));
+        }
+        current = parent;
+        depth += 1;
+    }
+    let Some((depth, cell)) = occurrences.first() else {
+        return format!("repl: no binding named `{name}`\n");
+    };
+    let scope_word = match depth {
+        0 => "session",
+        1 => "enclosing",
+        _ => "outer",
+    };
+    let value = cell.borrow();
+    let rendered = repl_value(&value);
+    let type_name = value_type(&value);
+    drop(value);
+    let mut out = format!("{name} = {rendered}   {type_name}   scope {depth} ({scope_word})\n");
+    for (outer_depth, outer) in occurrences.iter().skip(1) {
+        let outer_value = outer.borrow();
+        out.push_str(&format!(
+            "  outer {name} = {} @ scope {outer_depth}\n",
+            repl_value(&outer_value),
+        ));
+    }
+    if let Value::Function(function) = &*cell.borrow() {
+        out.push_str(&format!(
+            "  def: {}\n",
+            repl_function_def(function, session, source)
+        ));
+    }
+    out
+}
+
+/// Where a function value was defined: `label:line` in a registered source,
+/// or a note when it was created inside the session.
+fn repl_function_def(function: &Function, session: &EnvRef, source: &Option<SourceCtx>) -> String {
+    if env_contains(&function.env, session) {
+        return "defined in this session (repl)".into();
+    }
+    let Some(ctx) = source else {
+        return "defined outside the current source".into();
+    };
+    if function.body.span.start >= ctx.source.len() {
+        return "defined outside the current source".into();
+    }
+    let line = line_of(function.body.span.start, &ctx.source) + ctx.line_offset;
+    format!("{}:{}", ctx.label, line)
+}
+
+/// `:bt`: the live call stack, innermost frame first, with source positions.
+fn repl_backtrace(source: &Option<SourceCtx>) -> String {
+    let trace = CALL_TRACE.with(|trace| trace.borrow().clone());
+    if trace.is_empty() {
+        return "repl: backtrace is empty ((repl) is at the top level, not inside a function)\n"
+            .into();
+    }
+    let noun = if trace.len() == 1 { "frame" } else { "frames" };
+    let mut out = format!("backtrace ({} {noun})\n", trace.len());
+    let Some(ctx) = source else {
+        for (name, _) in trace.iter().rev() {
+            out.push_str(&format!("  {name}\n"));
+        }
+        return out;
+    };
+    for (name, frame) in trace.iter().rev() {
+        if frame.start >= ctx.source.len() {
+            out.push_str(&format!("  {name} at <unknown source>\n"));
+            continue;
+        }
+        let line = line_of(frame.start, &ctx.source) + ctx.line_offset;
+        let column = column_of(frame.start, &ctx.source);
+        let text = line_text_at(frame.start, &ctx.source).trim().to_owned();
+        let detail = if text.is_empty() {
+            String::new()
+        } else {
+            format!("   ({text})")
+        };
+        out.push_str(&format!(
+            "  {name} at {}:{line}:{column}{detail}\n",
+            ctx.label
+        ));
+    }
+    out
+}
+
+/// Render a value for `:i`: functions become `(fn (params))`, null `_`.
+fn repl_value(value: &Value) -> String {
+    match value {
+        Value::Null => "_".into(),
+        Value::Function(f) => {
+            let params = f.params.join(" ");
+            match &f.name {
+                Some(name) => format!("(fn {name} ({params}))"),
+                None => format!("(fn ({params}))"),
+            }
+        }
+        Value::NativeFunction(f) => format!("<native fn {}>", f.name),
+        other => lisp_source(other).unwrap_or_else(|_| debug_render(other)),
+    }
+}
+
+/// Truncate a rendered value when it does not fit a table row.
+fn clip(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_owned()
+    } else {
+        let mut clipped: String = text.chars().take(max).collect();
+        clipped.push('…');
+        clipped
+    }
+}
+
+/// Whether `env` is `target` or one of its ancestors.
+fn env_contains(env: &EnvRef, target: &EnvRef) -> bool {
+    let mut current = Some(env.clone());
+    while let Some(e) = current {
+        if Rc::ptr_eq(&e, target) {
+            return true;
+        }
+        current = e.borrow().parent.clone();
+    }
+    false
+}
+
+/// 1-based line number of a byte offset (the same math diagnostics use).
+fn line_of(offset: usize, source: &str) -> usize {
+    let offset = offset.min(source.len());
+    source[..offset].bytes().filter(|b| *b == b'\n').count() + 1
+}
+
+/// 1-based column of a byte offset.
+fn column_of(offset: usize, source: &str) -> usize {
+    let offset = offset.min(source.len());
+    let line_start = source[..offset].rfind('\n').map_or(0, |p| p + 1);
+    source[line_start..offset].chars().count() + 1
+}
+
+/// Byte range (start, end-exclusive-of-`\n`) of a 1-based line.
+fn line_bounds(source: &str, line: usize) -> (usize, usize) {
+    let mut start = 0;
+    for _ in 1..line {
+        match source[start..].find('\n') {
+            Some(i) => start += i + 1,
+            None => return (source.len(), source.len()),
+        }
+    }
+    let end = source[start..]
+        .find('\n')
+        .map_or(source.len(), |i| start + i);
+    (start, end)
+}
+
+/// The text of the line containing a byte offset (no trailing newline).
+fn line_text_at(offset: usize, source: &str) -> String {
+    let offset = offset.min(source.len());
+    let start = source[..offset].rfind('\n').map_or(0, |p| p + 1);
+    let end = source[offset..]
+        .find('\n')
+        .map_or(source.len(), |p| offset + p);
+    source[start..end].to_owned()
+}
+
+/// Restores the pre-session Ctrl-C state when the session ends, so an
+/// interrupt that lands during the session does not linger forever.
+struct InterruptedGuard {
+    interrupt: bool,
+    test_interrupt: bool,
+}
+impl Drop for InterruptedGuard {
+    fn drop(&mut self) {
+        INTERRUPTED.store(self.interrupt, Ordering::Relaxed);
+        REPL_INTERRUPT.with(|flag| flag.set(self.test_interrupt));
+    }
+}
+
 fn eval_repl_line(source: &str, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResult {
     let tokens = lex(source)?;
     let program = Parser { ts: tokens, i: 0 }.program()?;
-    let mut result = Value::Null;
-    for form in program {
-        result = eval(&form, env, loop_depth, match_depth)?;
-    }
-    Ok(result)
+    push_source(SourceCtx {
+        label: "<repl>".into(),
+        source: source.to_owned(),
+        line_offset: 0,
+    });
+    let outcome = (|| -> EResult {
+        let mut result = Value::Null;
+        for form in program {
+            result = eval(&form, env, loop_depth, match_depth)?;
+        }
+        Ok(result)
+    })();
+    pop_source();
+    outcome
 }
-fn run_repl(env: &EnvRef, loop_depth: usize, match_depth: usize, label: &str) -> EResult {
+fn run_repl(
+    env: &EnvRef,
+    loop_depth: usize,
+    match_depth: usize,
+    label: &str,
+    execution_span: Span,
+    source: Option<SourceCtx>,
+) -> EResult {
     // Evaluate REPL lines in a disposable child scope: `let` binds only inside
     // the session, while `set` and reads still reach the program's live state.
     let session = new_env(Some(env.clone()));
-    let prompt = if label.is_empty() {
-        "repl> ".to_owned()
-    } else {
-        format!("{label}> ")
+    let prompt = repl_prompt(label, &source, execution_span);
+    // A Ctrl-C inside the session cancels the current line and keeps the
+    // session alive; the pre-session state is restored on exit, so a Ctrl-C
+    // after resuming still aborts the program.
+    let _guard = InterruptedGuard {
+        interrupt: INTERRUPTED.load(Ordering::Relaxed),
+        test_interrupt: REPL_INTERRUPT.with(|flag| flag.get()),
     };
     let mut console = open_repl_console()?;
     let mut result = Value::Null;
     loop {
-        check_interrupted().map_err(Flow::Error)?;
+        let interrupted = INTERRUPTED.swap(false, Ordering::Relaxed)
+            || REPL_INTERRUPT.with(|flag| flag.replace(false));
+        if interrupted {
+            console.notify("repl: interrupted (:c continues, :q quits)\n");
+            continue;
+        }
         console.notify(&prompt);
         let Some(raw) = console.read_line() else {
             break;
@@ -1209,22 +1649,20 @@ fn run_repl(env: &EnvRef, loop_depth: usize, match_depth: usize, label: &str) ->
             continue;
         }
         if let Some(command) = line.strip_prefix(':') {
-            match command.trim() {
-                "c" | "continue" => break,
-                "q" | "quit" => {
+            match handle_repl_command(
+                command.trim(),
+                &session,
+                &mut console,
+                &source,
+                execution_span,
+            ) {
+                ReplCommand::Resume => break,
+                ReplCommand::Quit => {
                     return Err(Flow::Error(Error::Quit(
                         "repl: aborted by user (:quit)".into(),
                     )))
                 }
-                "h" | "help" => {
-                    console.notify(
-                        "commands: :c/:continue resume, :q/:quit abort, :h/:help this help; \
-                         anything else is evaluated as Lisp\n",
-                    );
-                }
-                _ => {
-                    console.notify(&format!("repl: unknown command `:{command}` (try :h)\n"));
-                }
+                ReplCommand::Stay => {}
             }
             continue;
         }
@@ -1240,6 +1678,13 @@ fn run_repl(env: &EnvRef, loop_depth: usize, match_depth: usize, label: &str) ->
                 if matches!(error, Error::Quit(_)) {
                     // A nested (repl) quit aborts the whole run, not just this session.
                     return Err(Flow::Error(error));
+                }
+                if matches!(error, Error::Interrupted) {
+                    // Ctrl-C landed mid-line: cancel the line, stay in the session.
+                    INTERRUPTED.store(false, Ordering::Relaxed);
+                    REPL_INTERRUPT.with(|flag| flag.set(false));
+                    console.notify("repl: interrupted (:c continues, :q quits)\n");
+                    continue;
                 }
                 // Errors inside a REPL line never propagate to the program.
                 let span = match &error {
@@ -1470,17 +1915,26 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                     PARSE_ERROR_SPAN.with(|span| *span.borrow_mut() = None);
                     LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
                 })?;
+                push_source(SourceCtx {
+                    label: "<eval>".into(),
+                    source: source.clone(),
+                    line_offset: 0,
+                });
                 let mut result = Value::Null;
-                for form in program {
-                    result = match eval(&form, env, l, m) {
-                        Ok(value) => value,
-                        Err(error) => {
-                            LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
-                            return Err(error);
-                        }
-                    };
-                }
-                return Ok(result);
+                let outcome = (|| {
+                    for form in program {
+                        result = match eval(&form, env, l, m) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
+                                return Err(error);
+                            }
+                        };
+                    }
+                    Ok(result)
+                })();
+                pop_source();
+                return outcome;
             }
             "repl" => {
                 if args.len() > 1 {
@@ -1491,7 +1945,10 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 } else {
                     as_str(eval(&args[0], env, l, m)?)?
                 };
-                return run_repl(env, l, m, &label);
+                // The innermost source being evaluated right now is the one the
+                // (repl) form lives in; :l/:i/:bt resolve spans against it.
+                let session_source = EVAL_SOURCES.with(|sources| sources.borrow().last().cloned());
+                return run_repl(env, l, m, &label, call_span, session_source);
             }
             _ => {
                 if [
@@ -2510,16 +2967,32 @@ fn main() {
             .map(|_| s)
             .map_err(|e| Error::Io(e.to_string()))
     };
+    // The REPL's :l/:i/:bt report file-accurate line numbers, so record how
+    // many leading lines (a shebang) were stripped before parsing.
+    let stripped_lines = if matches!(&src, Ok(s) if s.starts_with("#!")) {
+        1
+    } else {
+        0
+    };
     let src = src.map(|source| strip_shebang(&source).to_owned());
     let result = (|| -> Result<(), (Error, bool)> {
         let source = src.clone().map_err(|e| (e, false))?;
         let ts = lex(&source).map_err(|e| (e, true))?;
         let p = Parser { ts, i: 0 }.program().map_err(|e| (e, true))?;
         let e = new_env(None);
-        for x in p {
-            eval(&x, &e, 0, 0).map_err(|e| (flow_err(e), false))?;
-        }
-        Ok(())
+        push_source(SourceCtx {
+            label: file.to_owned(),
+            source: source.clone(),
+            line_offset: stripped_lines,
+        });
+        let outcome = (|| {
+            for x in p {
+                eval(&x, &e, 0, 0).map_err(|e| (flow_err(e), false))?;
+            }
+            Ok(())
+        })();
+        pop_source();
+        outcome
     })();
     if let Err((e, parse)) = result {
         let source = match &src {
