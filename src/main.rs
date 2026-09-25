@@ -94,6 +94,7 @@ enum Error {
     Arity(String),
     Math(String),
     Io(String),
+    Http(String),
     Format(String),
     Regex(String),
     DuplicateKey(String),
@@ -114,6 +115,7 @@ impl fmt::Display for Error {
             Arity(s) => write!(f, "ArityError: {s}"),
             Math(s) => write!(f, "MathError: {s}"),
             Io(s) => write!(f, "IOError: {s}"),
+            Http(s) => write!(f, "HTTPError: {s}"),
             Format(s) => write!(f, "FormatError: {s}"),
             Regex(s) => write!(f, "InvalidRegex: {s}"),
             DuplicateKey(s) => write!(f, "DuplicateKeyError: {s}"),
@@ -314,10 +316,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
             i = start;
         }
         let start = i;
-        while i < cs.len()
-            && !cs[i].is_whitespace()
-            && !"()[]{}:,.^\"';#".contains(cs[i])
-        {
+        while i < cs.len() && !cs[i].is_whitespace() && !"()[]{}:,.^\"';#".contains(cs[i]) {
             i += 1
         }
         if start == i {
@@ -372,8 +371,6 @@ fn number(s: &str) -> Result<Option<TokKind>, Error> {
         }
         let magnitude = u64::from_str_radix(d, base)
             .map_err(|_| Error::Parse(format!("invalid number `{s}`")))?;
-        // -2^63 is representable even though its magnitude overflows i64,
-        // mirroring the decimal `-9223372036854775808`.
         let value = if sign < 0 && magnitude == 1u64 << 63 {
             i64::MIN
         } else if sign < 0 {
@@ -1049,23 +1046,16 @@ fn need(args: &[Expr], n: usize, name: &str) -> Result<(), Flow> {
         Err(Error::Arity(format!("{name} expects {n} arguments, got {}", args.len())).into())
     }
 }
-/// Names that the call dispatcher recognizes in head position. Binding any of
-/// these with `let` or as a function parameter is rejected, so a single name
-/// can never refer to both a value and a form.
 const RESERVED_NAMES: &[&str] = &[
-    "let", "set", "if", "fn", "loop", "break", "continue", "match", "and", "or", "not",
-    "expect", "use", "eval", "@", "$", "~", "add", "sub", "mul", "div", "mod", "pow", "eq",
-    "ne", "lt", "gt", "le", "ge", "bit-and", "bit-or", "bit-xor", "bit-not", "bit-shl",
-    "bit-shr",
+    "let", "set", "if", "fn", "loop", "break", "continue", "match", "and", "or", "not", "expect",
+    "use", "eval", "$", "~", "add", "sub", "mul", "div", "mod", "pow", "eq", "ne", "lt", "gt",
+    "le", "ge", "bit-and", "bit-or", "bit-xor", "bit-not", "bit-shl", "bit-shr",
 ];
 
 fn is_reserved_name(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
 }
 
-/// §2 : un identifiant est ASCII uniquement et ne contient que des caractères
-/// de la classe `[A-Za-z0-9_-]`. Tout caractère hors de cette classe (comme
-/// `#`) est interdit dans un nom de liaison.
 fn is_valid_identity(name: &str) -> bool {
     !name.is_empty()
         && name
@@ -1081,9 +1071,7 @@ fn define_let(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<(String
         return Err(Error::Type("let name must be an identifier".into()).into());
     };
     if is_reserved_name(&name) {
-        return Err(
-            Error::Type(format!("reserved name cannot be bound: `{name}`")).into(),
-        );
+        return Err(Error::Type(format!("reserved name cannot be bound: `{name}`")).into());
     }
     if env.borrow().values.iter().any(|(k, _)| k == &name) {
         return Err(Error::DuplicateBinding(name).into());
@@ -1295,7 +1283,6 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 bind_value(&name, module.clone(), env).map_err(Flow::Error)?;
                 return Ok(module);
             }
-            "@" => return http_request(args, env, l, m),
             "$" => return format_value(args, env, l, m),
             "~" => {
                 if args.len() != 3 {
@@ -1343,8 +1330,6 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                     Parser { ts, i: 0 }.program()
                 })()
                 .map_err(|error| {
-                    // The string's spans index the eval'd text, not the file
-                    // being run; point the diagnostic at the eval call instead.
                     PARSE_ERROR_SPAN.with(|span| *span.borrow_mut() = None);
                     LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
                     error
@@ -1354,8 +1339,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                     result = match eval(&form, env, l, m) {
                         Ok(value) => value,
                         Err(error) => {
-                            LAST_ERROR_SPAN
-                                .with(|span| *span.borrow_mut() = Some(call_span));
+                            LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
                             return Err(error);
                         }
                     };
@@ -1380,7 +1364,9 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
 }
 fn invoke_operator(value: Value, vals: Vec<Value>, call_span: Span) -> EResult {
     if let Value::Struct(fields) = &value {
-        if fields.borrow().iter().any(|(key, _)| key == "_") {
+        if fields.borrow().iter().any(|(key, _)| key == "_")
+            && fields.borrow().iter().any(|(key, _)| key == "spec")
+        {
             if let Err(error) = validate_descriptor(fields, &vals) {
                 LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
                 return Err(error.into());
@@ -1498,7 +1484,7 @@ fn validate_descriptor(
     }
     for (index, (expected, actual)) in types.iter().zip(vals).enumerate() {
         let actual_type = value_type(actual);
-        if expected != actual_type {
+        if expected != actual_type && expected != "any" {
             return Err(Error::Type(format!(
                 "module function argument {} expects {expected}, got {actual_type}",
                 index + 1
@@ -1577,87 +1563,6 @@ fn as_str(v: Value) -> Result<String, Flow> {
         Ok(x)
     } else {
         Err(Error::Type("expected string".into()).into())
-    }
-}
-fn http_request(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult {
-    if args.len() != 2 && args.len() != 3 {
-        return Err(Error::Arity(format!("@ expects 2 or 3 arguments, got {}", args.len())).into());
-    }
-    let url = as_str(eval(&args[0], env, l, m)?)?;
-    let method = as_str(eval(&args[1], env, l, m)?)?.to_ascii_uppercase();
-    if !matches!(
-        method.as_str(),
-        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD"
-    ) {
-        return Err(Error::Type(format!("@ unsupported HTTP method: {method}")).into());
-    }
-    let body = if args.len() == 3 {
-        Some(json_render(&eval(&args[2], env, l, m)?).map_err(Flow::Error)?)
-    } else {
-        None
-    };
-    let request = ureq::request(&method, &url).set("Accept", "application/json");
-    let response = match body {
-        Some(body) => request
-            .set("Content-Type", "application/json")
-            .send_string(&body),
-        None => request.call(),
-    }
-    .map_err(|error| match error {
-        ureq::Error::Status(code, _) => {
-            Error::Io(format!("HTTP request failed with status {code}"))
-        }
-        ureq::Error::Transport(error) => Error::Io(format!("HTTP request failed: {error}")),
-    })?;
-
-    if method == "HEAD" {
-        return Ok(Value::Str(String::new()));
-    }
-    let content_type = response
-        .header("Content-Type")
-        .unwrap_or_default()
-        .to_owned();
-    let text = response
-        .into_string()
-        .map_err(|error| Error::Io(format!("failed to read HTTP response: {error}")))?;
-    if content_type
-        .split(';')
-        .next()
-        .is_some_and(|media_type| media_type.trim().eq_ignore_ascii_case("application/json"))
-    {
-        let json: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|error| Error::Io(format!("invalid JSON response: {error}")))?;
-        json_to_value(json).map_err(Flow::Error)
-    } else {
-        Ok(Value::Str(text))
-    }
-}
-fn json_to_value(value: serde_json::Value) -> Result<Value, Error> {
-    match value {
-        serde_json::Value::Null => Ok(Value::Null),
-        serde_json::Value::Bool(value) => Ok(Value::Bool(value)),
-        serde_json::Value::Number(value) => {
-            if let Some(value) = value.as_i64() {
-                Ok(Value::Int(value))
-            } else if let Some(value) = value.as_f64() {
-                Ok(Value::Float(value))
-            } else {
-                Err(Error::Io("JSON number cannot be represented".into()))
-            }
-        }
-        serde_json::Value::String(value) => Ok(Value::Str(value)),
-        serde_json::Value::Array(values) => Ok(Value::Array(Rc::new(RefCell::new(
-            values
-                .into_iter()
-                .map(|value| json_to_value(value).map(|value| Rc::new(RefCell::new(value))))
-                .collect::<Result<Vec<_>, _>>()?,
-        )))),
-        serde_json::Value::Object(fields) => Ok(Value::Struct(Rc::new(RefCell::new(
-            fields
-                .into_iter()
-                .map(|(key, value)| Ok((key, Rc::new(RefCell::new(json_to_value(value)?)))))
-                .collect::<Result<Vec<_>, Error>>()?,
-        )))),
     }
 }
 fn format_value(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult {
@@ -1812,10 +1717,6 @@ fn float_render(value: f64) -> String {
         value.to_string()
     }
 }
-/// Renders a float so the Lisp reader parses it back as the same f64 (`%x`).
-/// The reader only accepts plain-decimal literals containing `.` (no exponent
-/// syntax), so scientific notation produced by `f64::to_string` is expanded
-/// and a trailing `.0` keeps integral floats floats.
 fn float_source(value: f64) -> String {
     if value.is_nan() {
         return "NaN".into();
@@ -1856,7 +1757,7 @@ fn float_source(value: f64) -> String {
         format!("{plain}.0")
     }
 }
-fn json_render(v: &Value) -> Result<String, Error> {
+pub(crate) fn json_render(v: &Value) -> Result<String, Error> {
     match v {
         Value::Null => Ok("null".into()),
         Value::Bool(value) => Ok(value.to_string()),
@@ -1909,10 +1810,6 @@ fn json_string(value: &str) -> String {
     escaped.push('\"');
     escaped
 }
-/// Renders a string as a Lisp double-quoted literal. Uses only the escape
-/// sequences the reader understands (`\n`, `\r`, `\t`, `\\`, `\"`), so the
-/// result parses back to the same string. Any other character is emitted raw,
-/// which the reader accepts verbatim and therefore round-trips as well.
 fn lisp_string(value: &str) -> String {
     let mut escaped = String::from("\"");
     for c in value.chars() {
@@ -1928,7 +1825,6 @@ fn lisp_string(value: &str) -> String {
     escaped.push('\"');
     escaped
 }
-/// `%q` requires a string (references are followed, like `%j`).
 fn lisp_quoted(v: &Value) -> Result<String, Error> {
     match v {
         Value::Str(text) => Ok(lisp_string(text)),
@@ -1936,11 +1832,6 @@ fn lisp_quoted(v: &Value) -> Result<String, Error> {
         _ => Err(Error::Format("FormatTypeError: %q expects string".into())),
     }
 }
-/// Serializes a value as canonical Lisp source (`%x`), recursively. Nested
-/// strings use the reader's escaping rules; booleans and null use their `t`/`f`/`_`
-/// reader syntax, so the result reparses to an equal value. Struct keys are
-/// identifiers by construction and are emitted verbatim, in insertion order.
-/// Functions have no source representation and are rejected, as with `%j`.
 fn lisp_source(v: &Value) -> Result<String, Error> {
     match v {
         Value::Null => Ok("_".into()),
@@ -2029,13 +1920,14 @@ fn builtin(name: &str, vs: Vec<Value>) -> Result<Value, Error> {
             require_exact(name, vs.len(), 2)?;
             binary_numeric(name, vs[0].clone(), vs[1].clone())
         }
-        // eq is true when every pair of operands is equal; ne is its exact
-        // complement, true as soon as any pair differs. With fewer than two
-        // operands eq is vacuously true and ne therefore false.
         "eq" | "ne" => {
             let all_equal = (0..vs.len())
                 .all(|index| ((index + 1)..vs.len()).all(|other| equals(&vs[index], &vs[other])));
-            Ok(Value::Bool(if name == "eq" { all_equal } else { !all_equal }))
+            Ok(Value::Bool(if name == "eq" {
+                all_equal
+            } else {
+                !all_equal
+            }))
         }
         "lt" | "gt" | "le" | "ge" => {
             let ordered = vs.windows(2).try_fold(true, |_, pair| {
@@ -2305,9 +2197,6 @@ fn diagnostic(error: &Error, source: &str, file: &str, span: Option<Span>) -> St
     }
     out
 }
-/// A shebang line (`#!...`) is an interpreter directive for the kernel, not
-/// part of the program. When a script starts with one, only the first line is
-/// skipped — anything else keeps the source unchanged.
 fn strip_shebang(source: &str) -> &str {
     match source.strip_prefix("#!") {
         Some(rest) => rest.find('\n').map_or("", |offset| &rest[offset + 1..]),

@@ -216,9 +216,7 @@ fn read(args: Vec<Value>) -> Result<Value, Error> {
             .ok_or_else(|| Error::Io(format!("invalid file descriptor {fd}")))?;
         match handle {
             FileHandle::Read(stream) => read_line(&mut stream.reader),
-            FileHandle::Write(_) => {
-                Err(Error::Io(format!("file descriptor {fd} is not readable")))
-            }
+            FileHandle::Write(_) => Err(Error::Io(format!("file descriptor {fd} is not readable"))),
             FileHandle::Stdin => read_line(&mut io::stdin().lock()),
             FileHandle::Stdout => Err(Error::Io("file descriptor 1 is not readable".into())),
             FileHandle::Stderr => Err(Error::Io("file descriptor 2 is not readable".into())),

@@ -77,18 +77,19 @@ error (e.g. `file descriptor 1 is not readable`); `io.write` on a read-only desc
 
 ## HTTP
 
-`@` performs synchronous HTTP requests with `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and `HEAD`:
+The `http` module performs synchronous HTTP requests with `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, and `HEAD`:
 
 ```lisp
-(@ "https://example.com" "GET")
-(@ "https://example.com/api" "POST" {name:"Yvan"})
-(@ "https://example.com/api" "POST" "hello") ; sends the JSON string "hello"
+(use "http")
+(http.get "https://example.com")
+(http.post "https://example.com/api" {name:"Yvan"})
+(http.post "https://example.com/api" "hello") ; sends the JSON string "hello"
 ```
 
 JSON responses are converted to Lisp values when the response `Content-Type` is
-`application/json`; other responses are returned as strings. `HEAD` always returns an empty
-string. HTTP errors, unsupported methods, connection failures, and invalid JSON are reported as
-normal Lisp errors.
+`application/json` or any media type with a `+json` suffix (e.g. `application/problem+json`,
+per RFC 6839); other responses are returned as strings. `HEAD` always returns an empty
+string. HTTP errors, connection failures, and invalid JSON are reported as normal Lisp errors.
 
 ## Formatting and assertions
 

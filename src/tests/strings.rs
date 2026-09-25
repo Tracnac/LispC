@@ -157,7 +157,9 @@ fn formatting_percent_q_quotes_strings_as_lisp_literals() {
         let value = run(&format!("($ \"%q\" {literal})")).unwrap();
         assert!(
             matches!(&value, Value::Str(text) if text == expected),
-            "{literal} -> {}, expected {}", render(&value), expected
+            "{literal} -> {}, expected {}",
+            render(&value),
+            expected
         );
     }
 }
@@ -211,13 +213,19 @@ fn formatting_percent_x_serializes_values_as_lisp_source() {
         ("($ \"%x\" _)", "_"),
         ("($ \"%x\" [1 2 3])", "[1 2 3]"),
         (r#"($ "%x" [1 "hello" t _ 42])"#, r#"[1 "hello" t _ 42]"#),
-        (r#"($ "%x" {name:"Yvan" age:56})"#, r#"{name:"Yvan" age:56}"#),
+        (
+            r#"($ "%x" {name:"Yvan" age:56})"#,
+            r#"{name:"Yvan" age:56}"#,
+        ),
         (
             r#"($ "%x" {name:"Yvan" contact:{gsm:"0102030405"} scores:[10 20 30]})"#,
             r#"{name:"Yvan" contact:{gsm:"0102030405"} scores:[10 20 30]}"#,
         ),
         (r#"($ "%x" [1 "hello" [2 3]])"#, r#"[1 "hello" [2 3]]"#),
-        (r#"($ "%x" {a:[1 {b:[2 [3]]}] c:"e"})"#, r#"{a:[1 {b:[2 [3]]}] c:"e"}"#),
+        (
+            r#"($ "%x" {a:[1 {b:[2 [3]]}] c:"e"})"#,
+            r#"{a:[1 {b:[2 [3]]}] c:"e"}"#,
+        ),
         // Floats must serialize as reader-readiable plain decimals.
         ("($ \"%x\" 2.0)", "2.0"),
         ("($ \"%x\" (pow 10.0 21))", "1000000000000000000000.0"),
@@ -229,7 +237,9 @@ fn formatting_percent_x_serializes_values_as_lisp_source() {
         let value = run(source).unwrap();
         assert!(
             matches!(&value, Value::Str(text) if text == expected),
-            "{source} -> {}, expected {}", render(&value), expected
+            "{source} -> {}, expected {}",
+            render(&value),
+            expected
         );
     }
 }
@@ -401,7 +411,11 @@ fn positive_literals_beyond_i64_max_are_rejected() {
 
 #[test]
 fn negative_literals_below_i64_min_are_rejected() {
-    for src in ["-9223372036854775809", "-0x8000000000000001", "-0xFFFFFFFFFFFFFFFF"] {
+    for src in [
+        "-9223372036854775809",
+        "-0x8000000000000001",
+        "-0xFFFFFFFFFFFFFFFF",
+    ] {
         assert!(
             matches!(
                 run(src),
@@ -644,7 +658,10 @@ fn format_f_renders_negative_operand_division() {
 
 #[test]
 fn format_f_renders_large_integer_without_precision_loss() {
-    check(r#"($ "%f" 9223372036854775807)"#, r#""9223372036854775807""#);
+    check(
+        r#"($ "%f" 9223372036854775807)"#,
+        r#""9223372036854775807""#,
+    );
 }
 
 #[test]
@@ -660,8 +677,14 @@ fn format_f_renders_negative_large_integer_exactly() {
 
 #[test]
 fn format_f_renders_min_integer_exactly() {
-    check(r#"($ "%f" -9223372036854775808)"#, r#""-9223372036854775808""#);
-    check(r#"($ "%f" -0x8000000000000000)"#, r#""-9223372036854775808""#);
+    check(
+        r#"($ "%f" -9223372036854775808)"#,
+        r#""-9223372036854775808""#,
+    );
+    check(
+        r#"($ "%f" -0x8000000000000000)"#,
+        r#""-9223372036854775808""#,
+    );
 }
 
 #[test]

@@ -57,6 +57,16 @@ fn structs_unwrap_the_underscore_field_only_in_operator_position() {
 }
 
 #[test]
+fn struct_underscore_field_is_callable_without_module_descriptor_spec() {
+    check("(let wtf {a:\"Some\" _:(fn () 10)}) (wtf)", "10");
+    check(
+        "(let fn-as-field {_:(fn (x y) (add x y))}) (fn-as-field 2 3)",
+        "5",
+    );
+    check("(let nested {inner:{_:(fn () 7)}}) (nested.inner)", "7");
+}
+
+#[test]
 fn array_literal_preserves_its_elements() {
     check(r#"[1 2 3]"#, r#"[1 2 3]"#);
 }

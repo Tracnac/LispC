@@ -1,86 +1,5 @@
-use super::{http_fixture, run};
+use super::run;
 use crate::*;
-
-#[test]
-fn http_builtin_returns_text_and_json() {
-    let (url, handle) = http_fixture(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello",
-        None,
-    );
-    assert!(
-        matches!(run(&format!("(@ \"{url}\" \"GET\")")), Ok(Value::Str(value)) if value == "hello")
-    );
-    handle.join().unwrap();
-
-    let (url, handle) = http_fixture(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 13\r\n\r\n{\"answer\":42}",
-            None,
-        );
-    let value = run(&format!("(@ \"{url}\" \"GET\")")).unwrap();
-    assert_eq!(debug_render(&value), "Struct({answer: Int(42)})");
-    handle.join().unwrap();
-}
-
-#[test]
-fn http_builtin_serializes_lisp_strings_as_json() {
-    let (url, handle) = http_fixture(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
-        Some("\"hello\""),
-    );
-    assert!(matches!(
-        run(&format!("(@ \"{url}\" \"POST\" \"hello\")")),
-        Ok(Value::Str(value)) if value == "ok"
-    ));
-    handle.join().unwrap();
-
-    let (url, handle) = http_fixture(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok",
-        Some("{\"x\":1}"),
-    );
-    assert!(matches!(
-        run(&format!("(@ \"{url}\" \"POST\" {{x:1}})")),
-        Ok(Value::Str(value)) if value == "ok"
-    ));
-    handle.join().unwrap();
-}
-
-#[test]
-fn http_builtin_handles_head_without_decoding() {
-    let (url, handle) = http_fixture(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\nnot-json-body",
-            None,
-        );
-    assert!(matches!(
-        run(&format!("(@ \"{url}\" \"HEAD\")")),
-        Ok(Value::Str(value)) if value.is_empty()
-    ));
-    handle.join().unwrap();
-}
-
-#[test]
-fn http_builtin_reports_method_status_and_json_errors() {
-    assert!(matches!(
-        run("(@ \"http://127.0.0.1:1\" \"OPTIONS\")"),
-        Err(Error::Type(message)) if message.contains("unsupported HTTP method")
-    ));
-
-    let (url, handle) = http_fixture("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n", None);
-    assert!(matches!(
-        run(&format!("(@ \"{url}\" \"GET\")")),
-        Err(Error::Io(message)) if message.contains("status 404")
-    ));
-    handle.join().unwrap();
-
-    let (url, handle) = http_fixture(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 8\r\n\r\nnot-json",
-        None,
-    );
-    assert!(matches!(
-        run(&format!("(@ \"{url}\" \"GET\")")),
-        Err(Error::Io(message)) if message.contains("invalid JSON response")
-    ));
-    handle.join().unwrap();
-}
 
 #[test]
 fn file_descriptor_io_reads_lines_and_tracks_close_status() {
@@ -215,10 +134,7 @@ fn standard_file_descriptors_are_available() {
 
 #[test]
 fn io_read_is_buffered_across_repeated_calls_and_multiple_lines() {
-    let path = env::temp_dir().join(format!(
-        "small_lisp_io_buffered_{}.txt",
-        std::process::id()
-    ));
+    let path = env::temp_dir().join(format!("small_lisp_io_buffered_{}.txt", std::process::id()));
     // LF-terminated lines, an empty line, and a final line without a
     // terminator, read back through five repeated io.read calls.
     fs::write(&path, "alpha\nbeta\n\ngamma").unwrap();

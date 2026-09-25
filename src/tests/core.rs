@@ -13,7 +13,10 @@ fn shebang_line_is_stripped_before_lexing() {
     // No shebang: source unchanged.
     assert_eq!(strip_shebang("(add 1 2)"), "(add 1 2)");
     // A `#!` that is not at byte 0 is not a shebang.
-    assert_eq!(strip_shebang(" #!/bin/sh\n(add 1 2)"), " #!/bin/sh\n(add 1 2)");
+    assert_eq!(
+        strip_shebang(" #!/bin/sh\n(add 1 2)"),
+        " #!/bin/sh\n(add 1 2)"
+    );
 }
 
 #[test]
@@ -139,7 +142,16 @@ fn let_shadows_bindings_from_outer_scopes() {
 
 #[test]
 fn binding_form_and_builtin_names_is_rejected() {
-    for src in ["(let let 1)", "(let set 1)", "(let if 1)", "(let fn 1)", "(let expect 1)", "(let add 1)", "(let $ 1)", "(let @ 1)", "(let eval 1)"] {
+    for src in [
+        "(let let 1)",
+        "(let set 1)",
+        "(let if 1)",
+        "(let fn 1)",
+        "(let expect 1)",
+        "(let add 1)",
+        "(let $ 1)",
+        "(let eval 1)",
+    ] {
         assert!(
             matches!(run(src), Err(Error::Type(message)) if message.contains("reserved name cannot be bound")),
             "expected reserved-name error for {src}"
@@ -707,7 +719,9 @@ fn eval_rejects_non_string_arguments_and_bad_arity() {
 fn eval_failure_keeps_the_diagnostic_pointing_at_the_call() {
     let source = r#"(let a 1) (eval "(div 1 0)") (add a 1)"#;
     assert!(run(source).is_err());
-    let span = LAST_ERROR_SPAN.with(|span| *span.borrow()).expect("span recorded");
+    let span = LAST_ERROR_SPAN
+        .with(|span| *span.borrow())
+        .expect("span recorded");
     assert!(span.start <= source.len() && span.end <= source.len());
     assert!(
         source[..span.end].contains("eval"),

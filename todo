@@ -3,8 +3,6 @@ Performance
 
 - Deep copy on every read — the core cost of the "value semantics with explicit ^ aliasing" design. Every variable read, field access, and index (src/main.rs:821, 824, 896, 901, 919) does a full recursive copy() of arrays/structs, and every set/bind runs a full O(n) graph walk with fresh HashSets for cycle detection. Combined with per-element Cell allocation, arrays are expensive to build and to access. Fine for a scripting interpreter, but it's the root of both the crash fixed in 1–4 and most constant-factor slowness. A persistent/shared representation would help. (was 5)
 
-- io.read reads one byte at a time (src/modules/io.rs:186) — a syscall per byte on unbuffered File. A BufReader would make line reads orders of magnitude faster in loops. (was 7)
-
 - Descriptor spec is re-validated on every module call (validate_descriptor → validate_descriptor_spec in the call path). (from 10)
 
 Bug
@@ -14,11 +12,11 @@ Bug
 
 - Global mutable state duplicated as bookkeeping. Five thread_local! slots including LAST_ERROR_SPAN, which is written on every eval node (src/main.rs:811). That's thread-local borrow traffic on the hot path, and the "last span any node touched" scheme is fragile — an error in a native function points at whatever node happened to evaluate last, not necessarily the failing call. (was 8)
 
-- HTTP failures are reported as IOError (layering). (from 10)
-
 Feature
 =======
 
 - _ is doing three jobs — null literal, regex gap marker, and the magic "callable descriptor" key that makes any struct containing a _ field callable via auto-unboxing (invoke_operator, src/main.rs:1293). That last one is a surprising generalization of the module-descriptor mechanism onto every struct, and operator_value recursion on _ chains is yet another infinite-loop vector in the same family as bug #1. (was 9)
 
 - use special-cases the AST shape (let …) instead of evaluating normally. (from 10)
+
+- Module descriptor spec.type has a design hole: each argument maps to exactly one type name, which cannot express polymorphic arguments. The `"any"` marker (added for the http module body, src/modules/http.rs) is a stopgap that matches any value type but is not part of the core type vocabulary — decide how to model it properly (e.g. type unions, a first-class Any, or per-arg validator functions).

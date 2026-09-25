@@ -428,8 +428,14 @@ fn eq_is_pairwise_not_just_adjacent() {
     // 9007199254740993 (int) is equal to 9007199254740992.0 (float) once
     // rounded to f64, and that float equals 9007199254740992 (int); but the
     // two ints differ. eq must therefore be false for all three.
-    check(r#"(eq 9007199254740993 9007199254740992.0 9007199254740992)"#, r#"f"#);
-    check(r#"(ne 9007199254740993 9007199254740992.0 9007199254740992)"#, r#"t"#);
+    check(
+        r#"(eq 9007199254740993 9007199254740992.0 9007199254740992)"#,
+        r#"f"#,
+    );
+    check(
+        r#"(ne 9007199254740993 9007199254740992.0 9007199254740992)"#,
+        r#"t"#,
+    );
 }
 
 #[test]
