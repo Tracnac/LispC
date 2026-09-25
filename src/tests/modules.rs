@@ -24,8 +24,12 @@ fn use_accepts_string_names_and_rejects_unknown_modules() {
     assert!(matches!(value, Value::Str(text) if text == "HELLO"));
     let value = run(r#"(let module-name "str") (use module-name) (str.lower "ABC")"#).unwrap();
     assert!(matches!(value, Value::Str(text) if text == "abc"));
-    let value = run(r#"(let str "str") (use str) (str.upper "hello")"#).unwrap();
-    assert!(matches!(value, Value::Str(text) if text == "HELLO"));
+    // Binding the module to a name that already exists in the current scope is a
+    // duplicate, not an overwrite: `use` must not modify an existing variable.
+    assert!(matches!(
+        run(r#"(let str "str") (use str)"#),
+        Err(Error::DuplicateBinding(name)) if name == "str"
+    ));
     assert!(matches!(
         run("(use str)"),
         Err(Error::Name(message)) if message == "str"
@@ -170,4 +174,21 @@ fn descriptor_registration_requires_a_complete_callable_spec() {
             }))"#),
         Err(Error::Type(message)) if message.contains("spec.type")
     ));
+}
+
+#[test]
+fn use_binds_like_let_and_never_modifies_an_existing_binding() {
+    // `use` defines a module name in the current scope (like `let`): it must
+    // never overwrite an existing variable — only `set` modifies a binding (§4).
+    assert!(matches!(
+        run(r#"(let io "user value") (use "io")"#),
+        Err(Error::DuplicateBinding(name)) if name == "io"
+    ));
+    assert!(matches!(
+        run(r#"(use "io") (use "io")"#),
+        Err(Error::DuplicateBinding(name)) if name == "io"
+    ));
+    // Shadowing across scopes stays allowed and leaves the outer binding alone.
+    let value = run(r#"(use "io") (() (use "str")) ($ "%t" (use "str"))"#).unwrap();
+    assert!(matches!(value, Value::Str(text) if text == "struct"));
 }

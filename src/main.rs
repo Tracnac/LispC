@@ -637,23 +637,18 @@ fn lookup(env: &EnvRef, n: &str) -> Option<Cell> {
     }
     e.parent.clone().and_then(|p| lookup(&p, n))
 }
-fn bind_value(name: &str, value: Value, env: &EnvRef) -> Result<(), Error> {
+fn bind_module(name: &str, value: Value, env: &EnvRef) -> Result<(), Error> {
     if !is_valid_identity(name) {
         return Err(Error::Type(format!(
             "invalid binding name `{name}`: allowed characters are [A-Za-z0-9_-] (ASCII), §2"
         )));
     }
-    if let Some(cell) = lookup(env, name) {
-        let cell = follow(cell)?;
-        if value_references_cell(&value, &cell) {
-            return Err(Error::Type("cyclic reference".into()));
-        }
-        *cell.borrow_mut() = value;
-    } else {
-        env.borrow_mut()
-            .values
-            .push((name.to_owned(), Rc::new(RefCell::new(value))));
+    if env.borrow().values.iter().any(|(k, _)| k == name) {
+        return Err(Error::DuplicateBinding(name.to_owned()));
     }
+    env.borrow_mut()
+        .values
+        .push((name.to_owned(), Rc::new(RefCell::new(value))));
     Ok(())
 }
 fn follow(mut c: Cell) -> Result<Cell, Error> {
@@ -1268,9 +1263,13 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
             }
             "use" => {
                 need(args, 1, "use")?;
+                let mut bound = false;
                 let (name, module) = match &args[0].kind {
-                    ExprKind::Call(let_head, let_args) if matches!(&let_head.kind, ExprKind::Symbol(name) if name == "let") => {
-                        define_let(let_args, env, l, m)?
+                    ExprKind::Call(let_head, let_args) if matches!(&let_head.kind, ExprKind::Symbol(name) if name == "let") =>
+                    {
+                        let (name, module) = define_let(let_args, env, l, m)?;
+                        bound = true;
+                        (name, module)
                     }
                     ExprKind::Lit(Literal::Str(name)) => (name.clone(), native_module(name)?),
                     _ => {
@@ -1280,7 +1279,11 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                     }
                 };
                 validate_module(&module).map_err(Flow::Error)?;
-                bind_value(&name, module.clone(), env).map_err(Flow::Error)?;
+                if !bound {
+                    // Never overwrite an existing binding: only `set` modifies one
+                    // (a duplicate in the current scope is DuplicateBindingError).
+                    bind_module(&name, module.clone(), env).map_err(Flow::Error)?;
+                }
                 return Ok(module);
             }
             "$" => return format_value(args, env, l, m),

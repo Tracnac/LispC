@@ -58,6 +58,9 @@ Les symboles `t`, `f`, `_`, `NaN`, `+NaN`, `Inf`, `+Inf` et `-Inf` sont des litt
   un symbole `str` non lié produit donc NameError. La forme `(use (let nom valeur))` définit
   immédiatement un module Lisp nommé `nom`. Le registre natif actuel fournit `str`
   (`str.upper`, `str.lower`), `io` et `http`.
+* `use` lie `nom` dans le scope courant exactement comme `let` : un nom déjà lié dans CE même
+  scope produit DuplicateBindingError et n'est jamais réécrit — seul `set` (§4) modifie une
+  liaison existante. L'ombre portée d'une liaison parent reste autorisée.
 * Tout membre appelable d'un module doit être un descripteur `{_: callable spec: ...}`.
   `spec` doit contenir `documentation` (string), `arity` (integer), `type` (array, ou `_`
   lorsque `arity` vaut zéro) et `return` (array ou `_`). Chaque entrée de `type` est un nom de
