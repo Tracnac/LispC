@@ -80,5 +80,6 @@ mod http;
 mod io;
 mod modules;
 mod repl;
+mod semantics;
 mod strings;
 mod types;
