@@ -146,7 +146,7 @@ fn module_argument_validation_reports_the_call_site_after_nested_evaluation() {
         &error,
         Error::Type(message) if message.contains("argument 1 expects string, got int")
     ));
-    let span = LAST_ERROR_SPAN.with(|span| *span.borrow());
+    let span = LAST_ERROR_SPAN.with(|span| span.get());
     let rendered = diagnostic(&error, source, "sample.lisp", span);
     assert!(rendered.starts_with("sample.lisp:15:"));
     assert!(rendered.contains("(str.lower (module.open"));

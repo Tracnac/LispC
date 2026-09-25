@@ -81,7 +81,7 @@ fn recursion_error_diagnostic_carries_the_call_chain() {
             Err(error) => error,
             Ok(_) => return Err("expected runtime error".into()),
         };
-        let span = LAST_ERROR_SPAN.with(|span| *span.borrow());
+        let span = LAST_ERROR_SPAN.with(|span| span.get());
         let rendered = diagnostic(&error, &source, "r.lisp", span);
         let checks = [
             rendered.contains("RecursionError"),
@@ -944,7 +944,7 @@ fn eval_failure_keeps_the_diagnostic_pointing_at_the_call() {
     let source = r#"(let a 1) (eval "(div 1 0)") (add a 1)"#;
     assert!(run(source).is_err());
     let span = LAST_ERROR_SPAN
-        .with(|span| *span.borrow())
+        .with(|span| span.get())
         .expect("span recorded");
     assert!(span.start <= source.len() && span.end <= source.len());
     assert!(

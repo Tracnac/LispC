@@ -69,7 +69,25 @@ Bug
   usable recursion headroom far beyond the guard. The guard above means this is no longer a
   crash hazard; it is a performance/expressiveness item. (from the item above)
 
-- Global mutable state duplicated as bookkeeping. Five thread_local! slots including LAST_ERROR_SPAN, which is written on every eval node (src/main.rs:811). That's thread-local borrow traffic on the hot path, and the "last span any node touched" scheme is fragile — an error in a native function points at whatever node happened to evaluate last, not necessarily the failing call. (was 8)
+- Resolved: thread_local bookkeeping + LAST_ERROR_SPAN attribution. Measured (release,
+  wall-clock median-of-5) before committing any fix: the per-node
+  `LAST_ERROR_SPAN` write (eval entry, main.rs:1110) costs ~3% on the most node-dense
+  workload (tight loop 1.00 s → 0.97 s with the write removed) and ~0 on native/scalar
+  paths — and it is ~100% RefCell borrow-check overhead: `std::cell::Cell<Option<Span>>`
+  (Span is Copy) recovers the whole delta (Cell 0.97 s ≈ no-write 0.97 s), so the per-node
+  write stays (it is what makes Lisp-level errors point at the failing node inside a
+  function body). Fragility fixed at the three raise sites that ran "under" a stale span
+  (pointing at the last evaluated argument, not the failing call): arithmetic builtins
+  (call() before `builtin`), native module functions (invoke() before `(f.call)(vals)`),
+  and `$`/format_value (after arg evaluation). Probes before → after (first line:col):
+  `(div 5 0)` 1:8 → 1:1; `(io.open "file:///nonexistent?mode=r")` (with use "io")
+  1:21 → 1:12; `($ "%q")` 1:4 → 1:1. Descriptor (2226) / recursion-guard (2442) /
+  (eval) 2169-2182 already set call_span. Three regression tests in
+  src/tests/errors.rs; 473 tests green debug+release, fmt/clippy clean. CALL_TRACE /
+  LAST_TRACE (push/pop per Lisp call + clone-on-error) and EVAL_SOURCES (per eval
+  boundary) intentionally untouched — off the per-node path and cold; a full span-threaded
+  redesign (span in Flow/Error, delete the global) remains a separate item if ever wanted.
+  (was 8)
 
 Feature
 =======

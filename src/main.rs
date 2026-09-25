@@ -180,7 +180,7 @@ thread_local! {
     static PARSE_ERROR_SPAN: RefCell<Option<Span>> = const { RefCell::new(None) };
     static CALL_TRACE: RefCell<Vec<(String, Span)>> = const { RefCell::new(Vec::new()) };
     static LAST_TRACE: RefCell<Vec<(String, Span)>> = const { RefCell::new(Vec::new()) };
-    static LAST_ERROR_SPAN: RefCell<Option<Span>> = const { RefCell::new(None) };
+    static LAST_ERROR_SPAN: std::cell::Cell<Option<Span>> = const { std::cell::Cell::new(None) };
     // Sources currently being evaluated, innermost last: lets the REPL commands
     // :l/:i/:bt map a span (a byte offset) back to file line numbers and source
     // text. Pushed and popped at every evaluation boundary (program file,
@@ -1104,10 +1104,10 @@ fn location(e: &Expr, env: &EnvRef) -> Result<(Cell, Vec<PathStep>), Error> {
 
 fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResult {
     if let Err(error) = check_interrupted() {
-        LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(e.span));
+        LAST_ERROR_SPAN.with(|span| span.set(Some(e.span)));
         return Err(error.into());
     }
-    LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(e.span));
+    LAST_ERROR_SPAN.with(|span| span.set(Some(e.span)));
     match &e.kind {
         ExprKind::Lit(x) => Ok(match x {
             Literal::Null => Value::Null,
@@ -1155,7 +1155,7 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
             let mut v = Vec::with_capacity(xs.len());
             for field in xs {
                 if !seen.insert(&field.key) {
-                    LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(field.span));
+                    LAST_ERROR_SPAN.with(|span| span.set(Some(field.span)));
                     return Err(Error::DuplicateKey(field.key.clone()).into());
                 }
                 v.push((
@@ -1935,7 +1935,7 @@ fn run_repl(
                 // Errors inside a REPL line never propagate to the program.
                 let span = match &error {
                     Error::Parse(_) => PARSE_ERROR_SPAN.with(|span| *span.borrow()),
-                    _ => LAST_ERROR_SPAN.with(|span| *span.borrow()),
+                    _ => LAST_ERROR_SPAN.with(|span| span.get()),
                 };
                 console.notify(&format!("{}\n", repl_diagnostic(&error, &line, span)));
             }
@@ -2156,7 +2156,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 }
                 return Ok(module);
             }
-            "$" => return format_value(args, env, l, m),
+            "$" => return format_value(args, env, l, m, call_span),
             "eval" => {
                 need(args, 1, "eval")?;
                 let source = as_str(eval(&args[0], env, l, m)?)?;
@@ -2166,7 +2166,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 })()
                 .inspect_err(|_| {
                     PARSE_ERROR_SPAN.with(|span| *span.borrow_mut() = None);
-                    LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
+                    LAST_ERROR_SPAN.with(|span| span.set(Some(call_span)));
                 })?;
                 push_source(SourceCtx {
                     label: "<eval>".into(),
@@ -2179,7 +2179,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                         result = match eval(&form, env, l, m) {
                             Ok(value) => value,
                             Err(error) => {
-                                LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
+                                LAST_ERROR_SPAN.with(|span| span.set(Some(call_span)));
                                 return Err(error);
                             }
                         };
@@ -2210,7 +2210,11 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 ]
                 .contains(&name.as_str())
                 {
-                    return builtin(name, values(args, env, l, m)?).map_err(Into::into);
+                    let arguments = values(args, env, l, m)?;
+                    // Builtin errors (e.g. DivisionByZero) should point at the
+                    // call, not at the last argument evaluated above.
+                    LAST_ERROR_SPAN.with(|span| span.set(Some(call_span)));
+                    return builtin(name, arguments).map_err(Into::into);
                 }
             }
         }
@@ -2223,7 +2227,7 @@ fn invoke_operator(value: Value, vals: Vec<Value>, call_span: Span) -> EResult {
     if let Value::Struct(fields) = &value {
         if fields.iter().any(|(key, _)| key == "_") && fields.iter().any(|(key, _)| key == "spec") {
             if let Err(error) = validate_descriptor(fields, &vals) {
-                LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
+                LAST_ERROR_SPAN.with(|span| span.set(Some(call_span)));
                 return Err(error.into());
             }
             let call = fields
@@ -2410,6 +2414,9 @@ fn invoke(f: Value, vals: Vec<Value>, call_span: Span) -> EResult {
     let f = match f {
         Value::Function(f) => f,
         Value::NativeFunction(f) => {
+            // Errors raised inside a native (io/http/str/…) should point at
+            // the call, not at the last argument evaluated before it.
+            LAST_ERROR_SPAN.with(|span| span.set(Some(call_span)));
             return (f.call)(vals).map_err(Into::into);
         }
         _ => return Err(Error::Type("value is not callable".into()).into()),
@@ -2439,7 +2446,7 @@ fn invoke(f: Value, vals: Vec<Value>, call_span: Span) -> EResult {
         // (pointing at this call) plus the live call chain — instead of an
         // abort with no diagnostic. The span and trace below mirror what
         // invoke's own error handling would record for a body error.
-        LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
+        LAST_ERROR_SPAN.with(|span| span.set(Some(call_span)));
         CALL_TRACE.with(|trace| {
             let trace = trace.borrow();
             LAST_TRACE.with(|last| *last.borrow_mut() = trace.clone());
@@ -2545,12 +2552,15 @@ fn emit_capture(
     }
     Ok(())
 }
-fn format_value(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult {
+fn format_value(args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span: Span) -> EResult {
     if args.is_empty() {
         return Err(Error::Arity("$ expects format string".into()).into());
     }
     let fmt = as_str(eval(&args[0], env, l, m)?)?;
     let vs = values(&args[1..], env, l, m)?;
+    // Format-string errors (trailing %, FormatArityError, …) should point at
+    // the `$` call, not at the last argument evaluated above.
+    LAST_ERROR_SPAN.with(|span| span.set(Some(call_span)));
     let mut out = String::new();
     let mut it = fmt.chars().peekable();
     let mut i = 0;
@@ -3328,7 +3338,7 @@ fn interpreter_main() -> i32 {
                 let span = if parse {
                     PARSE_ERROR_SPAN.with(|span| *span.borrow())
                 } else {
-                    LAST_ERROR_SPAN.with(|span| *span.borrow())
+                    LAST_ERROR_SPAN.with(|span| span.get())
                 };
                 let _ = writeln!(io::stderr(), "{}", diagnostic(&e, source, file, span));
                 return 1;
