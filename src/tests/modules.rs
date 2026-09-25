@@ -41,6 +41,18 @@ fn module_descriptor_spec_is_checked_live_on_every_call() {
 }
 
 #[test]
+fn rebinding_a_module_value_copies_its_descriptors() {
+    // A module value obeys ordinary value semantics when rebound: mutating the
+    // copy's descriptor must not affect the bound module (and vice versa).
+    let value = run(r#"(use "str")
+               (let m2 str)
+               (set m2.upper.spec.arity 2)
+               ($ "%s:%s" str.upper.spec.arity m2.upper.spec.arity)"#)
+    .unwrap();
+    assert!(matches!(value, Value::Str(text) if text == "1:2"));
+}
+
+#[test]
 fn use_accepts_string_names_and_rejects_unknown_modules() {
     let value = run(r#"(use "str") (str.upper "hello")"#).unwrap();
     assert!(matches!(value, Value::Str(text) if text == "HELLO"));

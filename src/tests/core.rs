@@ -180,6 +180,86 @@ fn aliasing_outside_of_the_referenced_collection_is_not_cyclic() {
 }
 
 #[test]
+fn rebinding_a_value_copies_it_deeply_and_independently() {
+    // Value semantics: a rebind deep-copies, so mutating the source (or the
+    // copy) never leaks into the other side. Only `^` shares (aliases tests).
+    check(
+        "(let a [1 2]) (let b a) (set a[1] 9) (expect b [1 2]) t",
+        "t",
+    );
+    check(
+        "(let a [1 2]) (let b a) (set b[2] 9) (expect a [1 2]) t",
+        "t",
+    );
+    // Structs.
+    check("(let s {x: 1}) (let c s) (set s.x 9) (expect c.x 1) t", "t");
+    check("(let s {x: 1}) (let c s) (set c.x 9) (expect s.x 1) t", "t");
+    // Nested structure: the copy is recursive, field by field.
+    check(
+        "(let a {x: [1 2]}) (let b a) (set b.x[1] 9) (expect a.x [1 2]) t",
+        "t",
+    );
+    check(
+        "(let a {x: [1 2]}) (let b a) (set a.x[1] 9) (expect b.x [1 2]) t",
+        "t",
+    );
+}
+
+#[test]
+fn function_arguments_are_copies_unless_aliased() {
+    // By-value: the callee's writes hit its own copy.
+    check(
+        "(let bump (fn (x) ((set x[1] 9) x))) (let a [1 2]) (bump a) (expect a [1 2]) t",
+        "t",
+    );
+    // ^ makes the argument an alias: the callee mutates the caller's value.
+    check(
+        "(let bump (fn (x) (set x[1] 9))) (let a [1 2]) (bump ^a) (expect a [9 2]) t",
+        "t",
+    );
+}
+
+#[test]
+fn aliases_write_through_in_both_directions() {
+    // Whole-variable alias.
+    check(
+        "(let a [1 2]) (let q (^ a)) (set a[1] 9) (expect q [9 2]) t",
+        "t",
+    );
+    check(
+        "(let a [1 2]) (let q (^ a)) (set q[1] 9) (expect a [9 2]) t",
+        "t",
+    );
+    // Element alias.
+    check(
+        "(let a [1 2]) (let p (^ a[1])) (set a[1] 9) (expect p 9) t",
+        "t",
+    );
+    check(
+        "(let a [1 2]) (let p (^ a[1])) (set p 9) (expect a[1] 9) t",
+        "t",
+    );
+    // Struct field alias.
+    check(
+        "(let s {x: 1}) (let p (^ s.x)) (set s.x 9) (expect p 9) t",
+        "t",
+    );
+    check(
+        "(let s {x: 1}) (let p (^ s.x)) (set p 9) (expect s.x 9) t",
+        "t",
+    );
+    // Nested alias: rewrites through an intermediate location.
+    check(
+        "(let a {x: [1 2]}) (let p (^ a.x[1])) (set a.x[1] 9) (expect p 9) t",
+        "t",
+    );
+    check(
+        "(let a {x: [1 2]}) (let p (^ a.x[1])) (set p 9) (expect a.x [9 2]) t",
+        "t",
+    );
+}
+
+#[test]
 fn expect_checks_values_and_reports_comments() {
     let value = run("(expect (eq 1 1) t \"integers compare equally\")").unwrap();
     assert!(matches!(value, Value::Bool(true)));
