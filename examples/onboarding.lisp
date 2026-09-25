@@ -7,9 +7,9 @@
 (io.write 1 "What is your name?\n")
 (let name (io.read 0))
 
-; Regex matching can validate a non-empty answer and bind its captures.
+; Regex matching can validate a non-empty answer: a match emits the name, no match emits "f".
 (match
-  (~ "^(.+)$" name name-match)
+  (ne ($ "%~%1" "^(.+)$" name) "f")
   (
     (let profile {name:name visits:0 roles:["reader" "writer"]})
 

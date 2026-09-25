@@ -35,67 +35,6 @@ fn string_index_errors_match_collection_rules() {
 }
 
 #[test]
-fn regex_returns_and_binds_captures() {
-    let value = run(r#"(let string "Hello the world")
-               (~ "^Hello(.*)$" string caps)
-               (expect caps ["Hello the world" " the world"])"#)
-    .unwrap();
-    assert!(matches!(value, Value::Bool(true)));
-}
-
-#[test]
-fn regex_preserves_multiple_and_optional_captures() {
-    let value = run(r#"(let caps _)
-               (~ "^(a)(b)?(c)$" "ac" caps)
-               (expect caps ["ac" "a" _ "c"])"#)
-    .unwrap();
-    assert!(matches!(value, Value::Bool(true)));
-}
-
-#[test]
-fn regex_failure_does_not_overwrite_binding() {
-    let value = run(r#"(let caps ["unchanged"])
-               (expect (~ "^a+$" "bbb" caps) f)
-               (expect caps ["unchanged"])"#)
-    .unwrap();
-    assert!(matches!(value, Value::Bool(true)));
-
-    // A reserved name is rejected as the regex binding target.
-    assert!(matches!(
-        run(r#"(~ "^a$" "a" match)"#),
-        Err(Error::Type(message)) if message.contains("reserved name cannot be used as a binding")
-    ));
-}
-
-#[test]
-fn regex_reports_invalid_patterns_and_requires_strings() {
-    assert!(matches!(
-        run(r#"(~ "(" "text" match)"#),
-        Err(Error::Regex(message)) if message.contains("invalid regex")
-    ));
-    assert!(matches!(
-        run(r#"(~ "^a$" 1 match)"#),
-        Err(Error::Type(message)) if message == "expected string"
-    ));
-    assert!(matches!(
-        run(r#"(~ "^a$" "a" [match])"#),
-        Err(Error::Type(message)) if message.contains("binding")
-    ));
-}
-
-#[test]
-fn regex_binding_follows_nested_scope_rules() {
-    let value = run(r#"(let caps ["outer"])
-               (let result
-                 ((~ "^(a)$" "a" caps)
-                  caps))
-               (expect result ["a" "a"])
-               (expect caps ["a" "a"])"#)
-    .unwrap();
-    assert!(matches!(value, Value::Bool(true)));
-}
-
-#[test]
 fn formatting_supports_integer_bases_json_and_debug_output() {
     let value = run("($ \"%b %h %o\" 10 255 8)").unwrap();
     assert!(matches!(value, Value::Str(text) if text == "1010 ff 10"));
@@ -755,6 +694,172 @@ fn format_d_renders_shift_right_result() {
 }
 
 #[test]
-fn regex_without_match_returns_false() {
-    check(r#"(~ "xxx" "hello" match)"#, r#"f"#);
+fn format_tilde_regex_full_and_capture_shorthands() {
+    check(
+        r#"($ "%~%1" "mgU~^(.*) " "Hello the world")"#,
+        r#""Hello ""#,
+    );
+    check(r#"($ "%~%2" "mgU~^(.*) " "Hello the world")"#, r#""Hello""#);
+    check(
+        r#"($ "%~it's not %2, it's Good morning" "mgU~^(.*) " "Hello the world")"#,
+        r#""it's not Hello, it's Good morning""#,
+    );
+    check(r#"($ "%~%1" "(a)(b)" "xxabyyabzz")"#, r#""ab""#);
+    check(r#"($ "%~%2" "(a)(b)" "xxabyyabzz")"#, r#""a""#);
+    check(r#"($ "%~%3" "(a)(b)" "xxabyyabzz")"#, r#""b""#);
+}
+
+#[test]
+fn format_tilde_regex_match_capture_selectors() {
+    check(r#"($ "%~%1.1" "(a)(b)" "xxabyyabzz")"#, r#""ab""#);
+    check(r#"($ "%~%1.2" "(a)(b)" "xxabyyabzz")"#, r#""a""#);
+    check(r#"($ "%~%1.3" "(a)(b)" "xxabyyabzz")"#, r#""b""#);
+    check(r#"($ "%~%2.1" "(a)(b)" "xxabyyabzz")"#, r#""ab""#);
+    check(r#"($ "%~%2.2" "(a)(b)" "xxabyyabzz")"#, r#""a""#);
+    check(r#"($ "%~%2.3" "(a)(b)" "xxabyyabzz")"#, r#""b""#);
+    check(
+        r#"($ "%~%1.1 and %1.2 and %2.1" "(a)(b)" "abab")"#,
+        r#""ab and a and ab""#,
+    );
+}
+
+#[test]
+fn format_tilde_regex_option_default_gmu() {
+    // default gmu: multiline anchors on, case-sensitive
+    check(r#"($ "%~%1" "^b$" "a\nb")"#, r#""b""#);
+    check(r#"($ "%~%1" "^hello$" "HELLO")"#, r#""f""#);
+}
+
+#[test]
+fn format_tilde_regex_options_replace_defaults() {
+    // explicit options replace the default set
+    check(r#"($ "%~%1" "U~^b$" "a\nb")"#, r#""f""#);
+    check(r#"($ "%~%1" "m~^b$" "a\nb")"#, r#""b""#);
+    check(r#"($ "%~%1" "i~^hello$" "HELLO")"#, r#""HELLO""#);
+    check(r#"($ "%~%1" "s~^a.b$" "a\nb")"#, r#""a\nb""#);
+    check(r#"($ "%~%1" "x~a b" "ab")"#, r#""ab""#);
+    // R: CRLF is a line terminator (with m), unlike m alone
+    check(r#"($ "%~%1" "mR~ab$" "ab\r\ncd")"#, r#""ab""#);
+    check(r#"($ "%~%1" "m~ab$" "ab\r\ncd")"#, r#""f""#);
+}
+
+#[test]
+fn format_tilde_regex_g_finds_all_matches() {
+    check(r#"($ "%~%2.1" "g~(a)|(b)" "ab")"#, r#""b""#);
+    check(r#"($ "%~%2.2" "g~(a)|(b)" "ab")"#, r#""_""#);
+}
+
+#[test]
+fn format_tilde_regex_without_g_finds_first_match_only() {
+    check(r#"($ "%~%1.1" "U~(a)|(b)" "ab")"#, r#""a""#);
+    assert!(matches!(
+        run(r#"($ "%~%2.1" "U~(a)|(b)" "ab")"#),
+        Err(Error::Format(message)) if message.contains("match index 2 out of range")
+    ));
+}
+
+#[test]
+fn format_tilde_regex_without_selector_emits_nothing() {
+    check(r#"($ "%~" "(a)(b)" "xxabyyabzz")"#, r#""""#);
+    check(
+        r#"($ "before %~it's %1" "(a)(b)" "ab")"#,
+        r#""before it's ab""#,
+    );
+}
+
+#[test]
+fn format_tilde_regex_no_match_emits_f() {
+    check(r#"($ "%~%1" "^x" "abc")"#, r#""f""#);
+    check(r#"($ "%~%1.1" "^x" "abc")"#, r#""f""#);
+    check(r#"($ "%~%2" "^x(a)" "abc")"#, r#""f""#);
+    check(r#"($ "%~%2.1" "^x" "abc")"#, r#""f""#);
+}
+
+#[test]
+fn format_tilde_regex_optional_group_emits_underscore() {
+    check(r#"($ "%~%1.2" "(x)?y" "y")"#, r#""_""#);
+    check(r#"($ "%~%2" "(x)?y" "y")"#, r#""_""#);
+    check(r#"($ "%~%1.1" "(x)?y" "y")"#, r#""y""#);
+}
+
+#[test]
+fn format_tilde_regex_identifier_regex_argument() {
+    check(
+        r#"(let regex "mgU~^(.*) ") ($ "%~%2" regex "Hello the world")"#,
+        r#""Hello""#,
+    );
+}
+
+#[test]
+fn format_tilde_regex_plain_specifiers_still_work() {
+    check(r#"($ "100%% %~%1" "\\d+" "x42y")"#, r#""100% 42""#);
+    check(r#"($ "user %~%1" "u~^(\\w+)" "alice")"#, r#""user alice""#);
+}
+
+#[test]
+fn format_tilde_regex_selectors_require_pending_match() {
+    assert!(matches!(
+        run(r#"($ "%1" "x")"#),
+        Err(Error::Format(message)) if message == "FormatError: capture selector without preceding %~"
+    ));
+    assert!(matches!(
+        run(r#"($ "%2.1" "x")"#),
+        Err(Error::Format(message)) if message.contains("without preceding %~")
+    ));
+}
+
+#[test]
+fn format_tilde_regex_index_bounds_errors() {
+    assert!(matches!(
+        run(r#"($ "%~%0" "^a$" "a")"#),
+        Err(Error::Format(message)) if message.contains("capture index must be at least 1")
+    ));
+    assert!(matches!(
+        run(r#"($ "%~%0.1" "^a$" "a")"#),
+        Err(Error::Format(message)) if message.contains("match index must be at least 1")
+    ));
+    assert!(matches!(
+        run(r#"($ "%~%1.0" "^a$" "a")"#),
+        Err(Error::Format(message)) if message.contains("capture index must be at least 1")
+    ));
+    assert!(matches!(
+        run(r#"($ "%~%2.1" "^a$" "a")"#),
+        Err(Error::Format(message)) if message.contains("match index 2 out of range")
+    ));
+    assert!(matches!(
+        run(r#"($ "%~%1.2" "^a$" "a")"#),
+        Err(Error::Format(message)) if message.contains("capture index 2 out of range")
+    ));
+    assert!(matches!(
+        run(r#"($ "%~%1." "^a$" "a")"#),
+        Err(Error::Format(message)) if message.contains("invalid capture index")
+    ));
+    assert!(matches!(
+        run(r#"($ "%~%1.x" "^a$" "a")"#),
+        Err(Error::Format(message)) if message.contains("invalid capture index")
+    ));
+}
+
+#[test]
+fn format_tilde_regex_type_and_arity_errors() {
+    assert!(matches!(
+        run(r#"($ "%~%1" 42 "x")"#),
+        Err(Error::Format(message)) if message.contains("%~ expects string")
+    ));
+    assert!(matches!(
+        run(r#"($ "%~%1" "a" 42)"#),
+        Err(Error::Format(message)) if message.contains("%~ expects string")
+    ));
+    assert!(matches!(
+        run(r#"($ "%~" "a")"#),
+        Err(Error::Format(message)) if message == "FormatArityError"
+    ));
+    assert!(matches!(
+        run(r#"($ "%~%1" "a" "b" "c")"#),
+        Err(Error::Format(message)) if message == "FormatArityError"
+    ));
+    assert!(matches!(
+        run(r#"($ "%~%1" "(unclosed" "x")"#),
+        Err(Error::Regex(message)) if message.contains("invalid regex")
+    ));
 }

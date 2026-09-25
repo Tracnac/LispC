@@ -1,4 +1,4 @@
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use std::{
     cell::RefCell,
     collections::HashSet,
@@ -1048,8 +1048,8 @@ fn need(args: &[Expr], n: usize, name: &str) -> Result<(), Flow> {
 }
 const RESERVED_NAMES: &[&str] = &[
     "let", "set", "if", "fn", "loop", "break", "continue", "match", "and", "or", "not", "expect",
-    "use", "eval", "$", "~", "add", "sub", "mul", "div", "mod", "pow", "eq", "ne", "lt", "gt",
-    "le", "ge", "bit-and", "bit-or", "bit-xor", "bit-not", "bit-shl", "bit-shr",
+    "use", "eval", "$", "add", "sub", "mul", "div", "mod", "pow", "eq", "ne", "lt", "gt", "le",
+    "ge", "bit-and", "bit-or", "bit-xor", "bit-not", "bit-shl", "bit-shr",
 ];
 
 fn is_reserved_name(name: &str) -> bool {
@@ -1284,44 +1284,6 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 return Ok(module);
             }
             "$" => return format_value(args, env, l, m),
-            "~" => {
-                if args.len() != 3 {
-                    return Err(
-                        Error::Arity(format!("~ expects 3 arguments, got {}", args.len())).into(),
-                    );
-                }
-                let name = if let ExprKind::Symbol(name) = &args[2].kind {
-                    name
-                } else {
-                    return Err(Error::Type("regex binding must be an identifier".into()).into());
-                };
-                let pattern = as_str(eval(&args[0], env, l, m)?)?;
-                let text = as_str(eval(&args[1], env, l, m)?)?;
-                let regex = Regex::new(&pattern)
-                    .map_err(|error| Error::Regex(format!("invalid regex: {error}")))?;
-                let Some(captures) = regex.captures(&text) else {
-                    return Ok(Value::Bool(false));
-                };
-                let result = Value::Array(Rc::new(RefCell::new(
-                    captures
-                        .iter()
-                        .map(|capture| {
-                            Rc::new(RefCell::new(match capture {
-                                Some(value) => Value::Str(value.as_str().to_owned()),
-                                None => Value::Null,
-                            }))
-                        })
-                        .collect(),
-                )));
-                if is_reserved_name(name) {
-                    return Err(Error::Type(format!(
-                        "reserved name cannot be used as a binding: `{name}`"
-                    ))
-                    .into());
-                }
-                bind_value(name, result.clone(), env).map_err(Flow::Error)?;
-                return Ok(result);
-            }
             "eval" => {
                 need(args, 1, "eval")?;
                 let source = as_str(eval(&args[0], env, l, m)?)?;
@@ -1329,10 +1291,9 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                     let ts = lex(&source)?;
                     Parser { ts, i: 0 }.program()
                 })()
-                .map_err(|error| {
+                .inspect_err(|_| {
                     PARSE_ERROR_SPAN.with(|span| *span.borrow_mut() = None);
                     LAST_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(call_span));
-                    error
                 })?;
                 let mut result = Value::Null;
                 for form in program {
@@ -1565,6 +1526,78 @@ fn as_str(v: Value) -> Result<String, Flow> {
         Err(Error::Type("expected string".into()).into())
     }
 }
+const REGEX_FLAGS: &[u8] = b"gmisxUuR";
+fn parse_regex_arg(source: &str) -> Result<(Regex, bool), Error> {
+    let mut flags_end = 0;
+    while flags_end < source.len() && REGEX_FLAGS.contains(&source.as_bytes()[flags_end]) {
+        flags_end += 1;
+    }
+    let (options, pattern) =
+        if flags_end > 0 && flags_end < source.len() && source.as_bytes()[flags_end] == b'~' {
+            (&source[..flags_end], &source[flags_end + 1..])
+        } else {
+            ("gmu", source)
+        };
+    let mut builder = RegexBuilder::new(pattern);
+    for flag in options.bytes() {
+        match flag {
+            b'g' => {}
+            b'm' => {
+                builder.multi_line(true);
+            }
+            b'i' => {
+                builder.case_insensitive(true);
+            }
+            b's' => {
+                builder.dot_matches_new_line(true);
+            }
+            b'x' => {
+                builder.ignore_whitespace(true);
+            }
+            b'U' => {
+                builder.swap_greed(true);
+            }
+            b'u' => {
+                builder.unicode(true);
+            }
+            b'R' => {
+                builder.crlf(true);
+            }
+            _ => unreachable!("flag letters are validated by the leading scan"),
+        }
+    }
+    let find_all = options.bytes().any(|flag| flag == b'g');
+    let regex = builder
+        .build()
+        .map_err(|error| Error::Regex(format!("invalid regex: {error}")))?;
+    Ok((regex, find_all))
+}
+fn emit_capture(
+    out: &mut String,
+    matches_list: &[Vec<Option<String>>],
+    match_index: usize,
+    capture_index: usize,
+) -> Result<(), Error> {
+    if matches_list.is_empty() {
+        out.push('f');
+        return Ok(());
+    }
+    let Some(cells) = matches_list.get(match_index - 1) else {
+        return Err(Error::Format(format!(
+            "FormatError: match index {match_index} out of range"
+        )));
+    };
+    let Some(cell) = cells.get(capture_index - 1) else {
+        return Err(Error::Format(format!(
+            "FormatError: capture index {capture_index} out of range"
+        )));
+    };
+    match cell {
+        Some(capture) => out.push_str(capture),
+        None => out.push('_'),
+    }
+    Ok(())
+}
 fn format_value(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult {
     if args.is_empty() {
         return Err(Error::Arity("$ expects format string".into()).into());
@@ -1574,6 +1607,7 @@ fn format_value(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult {
     let mut out = String::new();
     let mut it = fmt.chars().peekable();
     let mut i = 0;
+    let mut pending: Option<Vec<Vec<Option<String>>>> = None;
     while let Some(c) = it.next() {
         if c != '%' {
             out.push(c);
@@ -1582,25 +1616,102 @@ fn format_value(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> EResult {
         let mut s = it
             .next()
             .ok_or_else(|| Flow::Error(Error::Format("trailing %".into())))?;
-        let width = if s.is_ascii_digit() {
+        if s == '~' {
+            let regex_value = vs
+                .get(i)
+                .ok_or_else(|| Flow::Error(Error::Format("FormatArityError".into())))?;
+            let text_value = vs
+                .get(i + 1)
+                .ok_or_else(|| Flow::Error(Error::Format("FormatArityError".into())))?;
+            i += 2;
+            let regex_source = match regex_value {
+                Value::Str(text) => text.clone(),
+                _ => {
+                    return Err(Error::Format("FormatTypeError: %~ expects string".into()).into());
+                }
+            };
+            let text = match text_value {
+                Value::Str(text) => text.clone(),
+                _ => {
+                    return Err(Error::Format("FormatTypeError: %~ expects string".into()).into());
+                }
+            };
+            let (regex, find_all) = parse_regex_arg(&regex_source)?;
+            let cells = |captures: regex::Captures| {
+                (0..captures.len())
+                    .map(|index| captures.get(index).map(|cap| cap.as_str().to_owned()))
+                    .collect::<Vec<Option<String>>>()
+            };
+            pending = Some(if find_all {
+                regex.captures_iter(&text).map(cells).collect()
+            } else {
+                regex.captures(&text).into_iter().map(cells).collect()
+            });
+            continue;
+        }
+        let mut width: Option<usize> = None;
+        if s.is_ascii_digit() {
             let mut digits = s.to_string();
             while it.peek().is_some_and(|next| next.is_ascii_digit()) {
                 digits.push(it.next().expect("peeked digit must be available"));
             }
-            s = it
-                .next()
-                .ok_or_else(|| Flow::Error(Error::Format("trailing format width".into())))?;
-            if s != 'b' && s != 'h' {
-                return Err(Error::Format(format!("unknown specifier %{digits}{s}")).into());
+            match it.peek() {
+                Some('.') => {
+                    it.next();
+                    let mut capture_digits = String::new();
+                    while it.peek().is_some_and(|next| next.is_ascii_digit()) {
+                        capture_digits.push(it.next().expect("peeked digit must be available"));
+                    }
+                    if capture_digits.is_empty() {
+                        return Err(Error::Format("invalid capture index".into()).into());
+                    }
+                    let matches_list = pending.as_ref().ok_or_else(|| {
+                        Flow::Error(Error::Format(
+                            "FormatError: capture selector without preceding %~".into(),
+                        ))
+                    })?;
+                    let match_index: usize = digits.parse().expect("digits are numeric");
+                    if match_index < 1 {
+                        return Err(Error::Format(
+                            "FormatError: match index must be at least 1".into(),
+                        )
+                        .into());
+                    }
+                    let capture_index: usize = capture_digits.parse().expect("digits are numeric");
+                    if capture_index < 1 {
+                        return Err(Error::Format(
+                            "FormatError: capture index must be at least 1".into(),
+                        )
+                        .into());
+                    }
+                    emit_capture(&mut out, matches_list, match_index, capture_index)?;
+                    continue;
+                }
+                Some('b') | Some('h') => {
+                    s = it.next().expect("peeked width specifier must be available");
+                    width =
+                        Some(digits.parse::<usize>().map_err(|_| {
+                            Flow::Error(Error::Format("invalid binary width".into()))
+                        })?);
+                }
+                _ => {
+                    let matches_list = pending.as_ref().ok_or_else(|| {
+                        Flow::Error(Error::Format(
+                            "FormatError: capture selector without preceding %~".into(),
+                        ))
+                    })?;
+                    let capture_index: usize = digits.parse().expect("digits are numeric");
+                    if capture_index < 1 {
+                        return Err(Error::Format(
+                            "FormatError: capture index must be at least 1".into(),
+                        )
+                        .into());
+                    }
+                    emit_capture(&mut out, matches_list, 1, capture_index)?;
+                    continue;
+                }
             }
-            Some(
-                digits
-                    .parse::<usize>()
-                    .map_err(|_| Flow::Error(Error::Format("invalid binary width".into())))?,
-            )
-        } else {
-            None
-        };
+        }
         if s == '%' {
             if width.is_some() {
                 return Err(Error::Format("unknown specifier".into()).into());

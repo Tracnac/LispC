@@ -37,11 +37,11 @@ Les symboles `t`, `f`, `_`, `NaN`, `+NaN`, `Inf`, `+Inf` et `-Inf` sont des litt
   `le`, `ge`, `bit-and`, `bit-or`, `bit-xor`, `bit-not`, `bit-shl` et `bit-shr`. Leurs
   arguments sont évalués puis l'opération est appliquée selon les règles d'arité de §6 et de
   typage de §8–§10.
-* Les builtins d'interaction sont : `$` et `~`. Le module natif `io` expose
-  `io.open`, `io.read`, `io.write` et `io.close` après `(use "io")` ; le module natif `http`
-  expose `http.get`, `http.post`, `http.put`, `http.patch`, `http.delete` et `http.head` après
-  `(use "http")`, décrits en §13.1. `$` effectue l'interpolation décrite en §14 et
-  `~` la correspondance décrite en §15.
+* Le builtin d'interaction est `$`, qui effectue l'interpolation décrite en §14 et inclut la
+  correspondance regex via `%~` (moteur et captures décrits en §15). Le module natif `io`
+  expose `io.open`, `io.read`, `io.write` et `io.close` après `(use "io")` ; le module natif
+  `http` expose `http.get`, `http.post`, `http.put`, `http.patch`, `http.delete` et
+  `http.head` après `(use "http")`, décrits en §13.1.
 * Les noms de formes spéciales, de builtins stricts et d'interaction ci-dessus sont réservés :
   ni un `let` ni un paramètre de fonction ne peut les utiliser comme identifiant (erreur), de
   sorte qu'un nom ne désigne jamais à la fois une valeur et une forme. Les littéraux réservés
@@ -270,6 +270,25 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
   `Struct(...)`, `Int(...)`, etc.). Les clés de struct suivent la syntaxe Lisp (`name: value`),
   sans guillemets.
 * `%%` produit un caractère `%` littéral et ne consomme aucun argument.
+* `%~` exige deux arguments : une string regex puis une string à matcher. La regex suit la
+  forme `[options]~modèle` : les lettres d'options `g`, `m`, `i`, `s`, `x`, `U`, `u`, `R`
+  écrites avant le `~` constituent le bloc d'options (qui remplace le défaut), le reste est le
+  motif. Sans bloc, les options par défaut sont `gmu`. Correspondances : `g` = trouver toutes
+  les correspondances (défaut ; sans `g`, seule la première est cherchée), `m` = ancres de
+  ligne, `i` = insensible à la casse, `s` = le point matche les sauts de ligne, `x` =
+  espacement et commentaires ignorés, `U` = gourmandise inversée, `u` = unicode, `R` = fins de
+  ligne CRLF. Une regex invalide produit InvalidRegex ; un argument non-string produit
+  FormatTypeError. `%~` calcule la liste des correspondances (de gauche à droite,
+  sans chevauchement) mais n'émet rien par lui-même.
+* `%M.C` émet la capture `C` de la M-ième correspondance : `C = 1` = correspondance complète,
+  `C = 2` = premier groupe capturant, etc. `%N` est un raccourci pour `%1.N` : `%1` =
+  correspondance complète de la première correspondance, `%2` = premier groupe capturant, etc.
+  Ces sélecteurs ne consomment aucun
+  argument. Aucune correspondance → `f` ; groupe optionnel non correspondant → `_` ; sélecteur
+  sans `%~` précédent, index nul (`%0` ou `.0`), ou index de correspondance/capture hors
+  bornes → FormatError.
+* Un motif commençant par des lettres d'options suivies de `~` serait interprété comme un bloc
+  d'options (limitation connue, sans échappement).
 * Un `%` final, un spécificateur inconnu ou une largeur binaire autre que 8, 16, 32 ou 64
   produit une FormatError.
 * Le nombre de spécificateurs consommant un argument doit correspondre exactement au nombre
@@ -278,17 +297,17 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
   avec un sous-message `FormatTypeError`.
 * Le résultat de `$` est toujours une string.
 
-15. Regex ~
-* Syntaxe : `(~ regex string binding)` → retourne `f` si aucune correspondance ; sinon retourne
-  un array contenant la correspondance complète suivie des groupes capturants, et lie cet array
-  à `binding`. `regex` et `string` doivent être des strings ; `binding` doit être un identifiant
-  non réservé (§2.1).
-* Les regex utilisent le moteur Rust `regex` et opèrent sur des strings UTF-8. Les groupes
-  capturants sont conservés dans leur ordre ; un groupe optionnel non correspondant devient `_`.
-* En cas de succès, une liaison existante (dans le scope courant ou parent) est mise à jour comme
-  avec `set`. Sinon, une nouvelle liaison est créée dans le scope courant comme avec `let`.
-* En cas d'échec, le résultat est `f` et la liaison existante n'est pas modifiée.
-* Une regex invalide produit InvalidRegex avec le diagnostic du moteur, sans modifier la liaison.
+15. Regex
+* La correspondance regex s'utilise uniquement via l'interpolation `$` : le spécificateur `%~`
+  (§14) applique une regex à une string et calcule la liste des correspondances ; les
+  sélecteurs `%M.C` et `%N` émettent la correspondance complète et les groupes capturants.
+* Les regex utilisent le moteur Rust `regex` et opèrent sur des strings UTF-8. Pour chaque
+  correspondance, la cellule 1 est la correspondance complète et les groupes capturants suivent
+  dans leur ordre : cellule 2 = premier groupe, cellule 3 = deuxième, etc.
+* Un groupe optionnel non correspondant produit `_` ; une string sans aucune correspondance
+  produit `f` pour tout sélecteur.
+* Une regex invalide produit InvalidRegex avec le diagnostic du moteur ; un argument non-string
+  produit FormatTypeError (§14).
 
 16. Eval
 * Syntaxe : `(eval source)` → évalue `source` comme du code Lisp et retourne la valeur de la

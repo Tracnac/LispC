@@ -50,10 +50,9 @@ bytes or Unicode scalar values.
 
 ### Regex captures
 
-`~` uses Rust's UTF-8 `regex` engine. Its syntax is
-`(~ regex string binding)`. On success it returns an array containing the full match followed by
-the capture groups, and binds that array to the supplied identifier. An unmatched optional group
-is represented by `_`. On failure it returns `f` and leaves an existing binding unchanged.
+Regex matching happens inside `$` formatting: the `%~` specifier applies a regex (with options)
+to an argument, and `%M.C` / `%N` emit whole matches and capture groups (see Formatting above).
+The engine is Rust's UTF-8 `regex`. An unmatched optional group emits `_`; no match at all emits `f`.
 
 ### Runtime eval
 
@@ -93,7 +92,7 @@ string. HTTP errors, connection failures, and invalid JSON are reported as norma
 
 ## Formatting and assertions
 
-`$` supports `%s` (rendered value), `%q` (string as a parseable Lisp literal), `%x` (any value as parseable Lisp source), `%d` (decimal integer), `%b` (binary integer), `%8b`, `%16b`, `%32b`, and `%64b` (fixed-width binary integers), `%h` (lowercase hexadecimal integer), `%8h`, `%16h`, `%32h`, and `%64h` (fixed-width hexadecimal integers), `%o` (octal integer), `%f` (number), `%j` (JSON), `%t` (value type), `%v` (structural debug output), and `%%` (a literal percent sign). Fixed-width binary forms render the low bits of the integer, including two's-complement representations for negative integers.
+`$` supports `%s` (rendered value), `%q` (string as a parseable Lisp literal), `%x` (any value as parseable Lisp source), `%d` (decimal integer), `%b` (binary integer), `%8b`, `%16b`, `%32b`, and `%64b` (fixed-width binary integers), `%h` (lowercase hexadecimal integer), `%8h`, `%16h`, `%32h`, and `%64h` (fixed-width hexadecimal integers), `%o` (octal integer), `%f` (number), `%j` (JSON), `%t` (value type), `%v` (structural debug output), and `%%` (a literal percent sign). Fixed-width binary forms render the low bits of the integer, including two's-complement representations for negative integers. `%~` applies a regex to a second argument — the regex takes the form `[options]~pattern`, where options are letters from `gmisxUuR` (default `gmu`; `g` finds all matches, `m` line anchors, `i` case-insensitive, `s` dot matches newlines, `x` ignored whitespace, `U` ungreedy, `u` unicode, `R` CRLF line endings) — computing all matches without emitting anything itself. `%M.C` then emits capture `C` (`C=1` = whole match, `C=2` = first capture, …) of match `M`, and `%N` is shorthand for `%1.N` (`%1` = whole first match, `%2` = first capture, …). No match emits `f`; a missing optional capture emits `_`.
 
 `expect` checks that its first expression equals its second expression and returns `t`. An optional final string describes the assertion when it fails.
 

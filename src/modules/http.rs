@@ -178,7 +178,11 @@ fn request(method: &str, url: &str, body: Option<Value>) -> Result<Value, Error>
     let text = response
         .into_string()
         .map_err(|error| Error::Http(format!("failed to read HTTP response: {error}")))?;
-    if content_type.split(';').next().is_some_and(is_json_media_type) {
+    if content_type
+        .split(';')
+        .next()
+        .is_some_and(is_json_media_type)
+    {
         let json: serde_json::Value = serde_json::from_str(&text)
             .map_err(|error| Error::Http(format!("invalid JSON response: {error}")))?;
         json_to_value(json)
