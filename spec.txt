@@ -373,8 +373,8 @@ Interpréteur tree-walking en Rust (parse → AST → eval récursif).
   jamais au programme. `(break)`/`(continue)` tapés dans la session se propagent et agissent
   sur la boucle englobante. Un `(repl)` imbriqué fonctionne (récursif) et son `:q` abandonne
   tout le run.
-* L'entrée de la session est le stdin du processus : après `:c`, le programme continue de lire
-  stdin à la suite des lignes déjà consommées par la session. En pratique, la session est
-  utilisable quand le programme est chargé depuis un fichier (s'il vient de stdin, le flux est
-  déjà épuisé).
+* La session lit et écrit sur le terminal de contrôle du processus (`/dev/tty`) : le stdin du
+  programme n'est jamais consommé par la session, même quand le programme est chargé depuis
+  stdin (`cat prog.lisp | small-lisp`) ; `io.read 0` continue de lire le stdin d'origine. Sans
+  terminal de contrôle, `(repl)` échoue avec IOError — pas de repli silencieux sur stdin.
 * Ctrl-C reste intercepté : `Interrupted` abandonne le run, y compris pendant une session.

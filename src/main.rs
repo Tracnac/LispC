@@ -4,7 +4,7 @@ use std::{
     collections::{HashSet, VecDeque},
     env, fmt,
     fs::{self},
-    io::{self, Read, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -1087,18 +1087,81 @@ fn define_let(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<(String
     Ok((name, value))
 }
 
-fn repl_line_source() -> Option<String> {
-    REPL_INPUT.with(|queue| {
-        let mut guard = queue.borrow_mut();
-        if let Some(lines) = guard.as_mut() {
-            return lines.pop_front();
-        }
-        let mut line = String::new();
-        match io::stdin().read_line(&mut line) {
-            Ok(0) | Err(_) => None,
-            Ok(_) => Some(line),
-        }
+/// REPL console. Real sessions are driven from the process's controlling
+/// terminal (/dev/tty) so that program stdin is never consumed by the REPL;
+/// tests inject lines through the REPL_INPUT thread-local hook instead.
+enum ReplConsole {
+    Queued(VecDeque<String>),
+    Tty {
+        reader: BufReader<fs::File>,
+        writer: fs::File,
+    },
+}
+
+fn open_repl_console() -> Result<ReplConsole, Error> {
+    if let Some(lines) = REPL_INPUT.with(|queue| queue.borrow_mut().take()) {
+        return Ok(ReplConsole::Queued(lines));
+    }
+    let tty = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .map_err(|error| {
+            Error::Io(format!(
+                "repl: cannot open the controlling terminal (/dev/tty): {error}"
+            ))
+        })?;
+    let reader = BufReader::new(tty.try_clone().map_err(|error| {
+        Error::Io(format!(
+            "repl: cannot duplicate /dev/tty for reading: {error}"
+        ))
+    })?);
+    Ok(ReplConsole::Tty {
+        reader,
+        writer: tty,
     })
+}
+
+impl ReplConsole {
+    /// One REPL line: a queued test line, or from the controlling terminal.
+    fn read_line(&mut self) -> Option<String> {
+        match self {
+            ReplConsole::Queued(lines) => lines.pop_front(),
+            ReplConsole::Tty { reader, writer: _ } => {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => None,
+                    Ok(_) => Some(line),
+                }
+            }
+        }
+    }
+    /// Echo an evaluated result: program stdout in test mode, the terminal otherwise.
+    fn echo(&mut self, text: &str) {
+        match self {
+            ReplConsole::Queued(_) => {
+                let _ = writeln!(io::stdout(), "{text}");
+            }
+            ReplConsole::Tty { writer, .. } => {
+                let _ = writeln!(writer, "{text}");
+                let _ = writer.flush();
+            }
+        }
+    }
+    /// Prompt, diagnostic and notice output: program stderr in test mode, the
+    /// terminal otherwise.
+    fn notify(&mut self, text: &str) {
+        match self {
+            ReplConsole::Queued(_) => {
+                let _ = write!(io::stderr(), "{text}");
+                let _ = io::stderr().flush();
+            }
+            ReplConsole::Tty { writer, .. } => {
+                let _ = writer.write_all(text.as_bytes());
+                let _ = writer.flush();
+            }
+        }
+    }
 }
 fn repl_echo(value: &Value) -> String {
     match value {
@@ -1133,12 +1196,12 @@ fn run_repl(env: &EnvRef, loop_depth: usize, match_depth: usize, label: &str) ->
     } else {
         format!("{label}> ")
     };
+    let mut console = open_repl_console()?;
     let mut result = Value::Null;
     loop {
         check_interrupted().map_err(Flow::Error)?;
-        let _ = write!(io::stderr(), "{prompt}");
-        let _ = io::stderr().flush();
-        let Some(raw) = repl_line_source() else {
+        console.notify(&prompt);
+        let Some(raw) = console.read_line() else {
             break;
         };
         let line = raw.trim_end_matches(['\r', '\n']).to_owned();
@@ -1154,14 +1217,13 @@ fn run_repl(env: &EnvRef, loop_depth: usize, match_depth: usize, label: &str) ->
                     )))
                 }
                 "h" | "help" => {
-                    let _ = writeln!(
-                        io::stderr(),
+                    console.notify(
                         "commands: :c/:continue resume, :q/:quit abort, :h/:help this help; \
-                         anything else is evaluated as Lisp"
+                         anything else is evaluated as Lisp\n",
                     );
                 }
                 _ => {
-                    let _ = writeln!(io::stderr(), "repl: unknown command `:{command}` (try :h)");
+                    console.notify(&format!("repl: unknown command `:{command}` (try :h)\n"));
                 }
             }
             continue;
@@ -1171,7 +1233,7 @@ fn run_repl(env: &EnvRef, loop_depth: usize, match_depth: usize, label: &str) ->
                 result = value;
                 let echo = repl_echo(&result);
                 if !echo.is_empty() {
-                    println!("{echo}");
+                    console.echo(&echo);
                 }
             }
             Err(Flow::Error(error)) => {
@@ -1184,7 +1246,7 @@ fn run_repl(env: &EnvRef, loop_depth: usize, match_depth: usize, label: &str) ->
                     Error::Parse(_) => PARSE_ERROR_SPAN.with(|span| *span.borrow()),
                     _ => LAST_ERROR_SPAN.with(|span| *span.borrow()),
                 };
-                let _ = writeln!(io::stderr(), "{}", repl_diagnostic(&error, &line, span));
+                console.notify(&format!("{}\n", repl_diagnostic(&error, &line, span)));
             }
             Err(flow) => return Err(flow), // (break)/(continue) act on the enclosing loop
         }

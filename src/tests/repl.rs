@@ -73,3 +73,14 @@ fn repl_accepts_an_optional_label_and_eof_returns_null() {
     REPL_INPUT.with(|queue| *queue.borrow_mut() = None);
     assert!(matches!(value, Value::Int(x) if x == 2));
 }
+
+#[test]
+fn open_repl_console_uses_the_queued_hook_without_touching_the_tty() {
+    feed(&["(add 1 1)", ":c"]);
+    let console = open_repl_console().expect("queued console");
+    match console {
+        ReplConsole::Queued(lines) => assert_eq!(lines.len(), 2),
+        ReplConsole::Tty { .. } => panic!("expected the queued test console, not /dev/tty"),
+    }
+    REPL_INPUT.with(|queue| *queue.borrow_mut() = None);
+}

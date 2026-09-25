@@ -79,8 +79,11 @@ Every line is evaluated as Lisp in a throwaway child scope: `set` mutates progra
 `let` binds only inside the session, and the last non-null result is echoed. Commands —
 `:c`/`:continue` resumes the program, `:q`/`:quit` aborts it, `:h`/`:help` lists commands.
 Errors inside a line are reported without stopping the program, `(break)`/`(continue)` act on
-the enclosing loop, and nested `(repl)` sessions work. Lines are read from stdin, so run the
-program from a file; EOF ends the session like `:c`.
+the enclosing loop, and nested `(repl)` sessions work. The session reads from and writes to the
+process's controlling terminal (`/dev/tty`), so program stdin is never consumed — even
+`cat program.lisp | small-lisp` reaches an interactive session, and `(io.read 0)` keeps reading
+the original stdin. Without a controlling terminal, `(repl)` raises an IO error instead of
+falling back to stdin; EOF on the terminal ends the session like `:c`.
 
 ## File IO
 

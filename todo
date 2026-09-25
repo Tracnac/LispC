@@ -18,8 +18,9 @@ Feature
 - Resolved: `(repl)` builtin — an interactive debugging session that suspends the program at
   the call site. Lines evaluate in a disposable child scope (`let` stays local, `set` reaches
   the program); `:c` resumes, `:q` aborts (Error::Quit), errors never propagate, `(break)`/
-  `(continue)` act on the enclosing loop, nested `(repl)` works. Stdin-fed; the program must
-  run from a file to leave input for the session. Tested via the REPL_INPUT thread-local hook.
+  `(continue)` act on the enclosing loop, nested `(repl)` works. Runs on the controlling
+  terminal (/dev/tty), so program stdin stays untouched even when the program is piped in;
+  without a tty it fails with IOError (no stdin fallback). Tests use the REPL_INPUT hook.
 
 - Resolved: `_` no longer makes arbitrary structs callable, and unwrapping is no longer
   recursive. Only the full descriptor pair `{_: callable spec: ...}` auto-unboxes in operator
