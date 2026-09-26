@@ -809,12 +809,371 @@ fn format_tilde_regex_plain_specifiers_still_work() {
 fn format_tilde_regex_selectors_require_pending_match() {
     assert!(matches!(
         run(r#"($ "%1" "x")"#),
-        Err(Error::Format(message)) if message == "FormatError: capture selector without preceding %~"
+        Err(Error::Format(message)) if message == "capture selector without preceding %~"
     ));
     assert!(matches!(
         run(r#"($ "%2.1" "x")"#),
         Err(Error::Format(message)) if message.contains("without preceding %~")
     ));
+}
+
+/// Every `FormatError` sub-message is bare: the category prefix comes from the
+/// `Display` arm alone. This walks the whole error-producing surface of `$` and
+/// asserts the rendered text carries exactly one `FormatError: `, so a site that
+/// bakes the prefix into the sub-message is caught by a rendered-text assertion
+/// rather than only by a substring check on the inner string.
+#[test]
+fn format_errors_never_repeat_the_category_prefix() {
+    let sources = [
+        r#"($ "%1" "x")"#,
+        r#"($ "%2.1" "x")"#,
+        r#"($ "%3d" 5)"#,
+        r#"($ "%0" 5)"#,
+        r#"($ "%0.1" "x")"#,
+        r#"($ "%1.0" "x")"#,
+        r#"($ "%1.1" 5)"#,
+        r#"($ "%~%0" "^a$" "a")"#,
+        r#"($ "%~%0.1" "^a$" "a")"#,
+        r#"($ "%~%1.0" "^a$" "a")"#,
+        r#"($ "%~%2.1" "^a$" "a")"#,
+        r#"($ "%~%1.2" "^a$" "a")"#,
+        r#"($ "%~%1." "^a$" "a")"#,
+        r#"($ "%~%9" "^a$" "a")"#,
+        r#"($ "%~%1.9" "^a$" "a")"#,
+        r#"($ "x%")"#,
+        r#"($ "%z" 5)"#,
+        r#"($ "%7b" 5)"#,
+        r#"($ "%9h" 5)"#,
+        r#"($ "%d" "x")"#,
+        r#"($ "%f" "x")"#,
+        r#"($ "%q" 5)"#,
+        r#"($ "%~" 5)"#,
+        r#"($ "%j" (fn (x) x))"#,
+        r#"($ "%j" +Inf)"#,
+        r#"($ "%d")"#,
+        r#"($ "%d" 1 2)"#,
+        r#"($ "%d %d" 1)"#,
+    ];
+    for source in sources {
+        let error = match run(source) {
+            Err(error) => error,
+            Ok(_) => panic!("{source} was expected to fail"),
+        };
+        let rendered = error.to_string();
+        assert!(
+            !rendered.contains("FormatError: FormatError:"),
+            "{source} rendered as {rendered}"
+        );
+        if matches!(error, Error::Format(_)) {
+            assert_eq!(
+                rendered.matches("FormatError: ").count(),
+                1,
+                "{source} rendered as {rendered}"
+            );
+        }
+    }
+}
+
+/// A string nested in a composite is rendered with the reader's own six
+/// escapes, not JSON's, so `%s` output stays readable by `eval`. The two
+/// escape sets differ only below 0x1F. This test takes the control character
+/// from a file, which is how one arrives in practice; a `\u{1}` escape covers
+/// the same ground from source, in the test below.
+#[test]
+fn nested_percent_s_escapes_with_the_readers_own_escapes() {
+    let path = env::temp_dir().join(format!("small_lisp_nested_s_{}.bin", std::process::id()));
+    fs::write(&path, b"a\x01b").unwrap();
+    let path = path.display().to_string();
+    let read = format!(r#"(io.read (io.open "file:{path}?mode=r"))"#);
+
+    // A control character has to be inside a *nested* string, which is why this
+    // goes through a file rather than a literal.
+    let value = run(&format!(
+        r#"(use "io")
+           (let s {read})
+           (eq (eval ($ "%s" [s]))[1] s)"#
+    ))
+    .unwrap();
+    assert!(matches!(value, Value::Bool(true)));
+
+    // The rendered form carries no JSON escape, and %j still does.
+    let rendered = run(&format!(
+        r#"(use "io")
+           (let s {read})
+           ($ "%s" [s s])"#
+    ))
+    .unwrap();
+    assert!(!matches!(&rendered, Value::Str(text) if text.contains("\\u00")));
+
+    let json = run(&format!(
+        r#"(use "io")
+           (let s {read})
+           ($ "%j" [s s])"#
+    ))
+    .unwrap();
+    assert!(matches!(&json, Value::Str(text) if text.contains("\\u0001")));
+
+    fs::remove_file(path).unwrap();
+}
+
+/// A `"..."` string accepts exactly the six documented escapes. Anything else
+/// after a backslash is a `ParseError` naming the offending character, so a
+/// stray backslash cannot silently swallow the character that follows it.
+#[test]
+fn unknown_string_escapes_are_a_parse_error() {
+    for source in [
+        r#""\q""#,
+        r#""\0""#,
+        r#""\x41""#,
+        r#""\b""#,
+        r#""\f""#,
+        r#""\e""#,
+        r#""\a\zb""#,
+    ] {
+        assert!(
+            matches!(
+                run(source),
+                Err(Error::Parse(message)) if message.starts_with("unknown escape sequence")
+            ),
+            "{source} was accepted"
+        );
+    }
+
+    // The six accepted escapes still decode. %q renders each back so the
+    // decoded character is visible without embedding a control byte here.
+    for (escape, expected) in [
+        (r#""\n""#, r#""\n""#),
+        (r#""\t""#, r#""\t""#),
+        (r#""\r""#, r#""\r""#),
+        (r#""\\""#, r#""\\""#),
+        (r#""\"""#, r#""\"""#),
+        (r#""\'""#, r#""'""#),
+    ] {
+        let value = run(&format!(r#"($ "%q" {escape})"#)).unwrap();
+        let Value::Str(text) = value else {
+            panic!("{escape} did not render as a string");
+        };
+        assert_eq!(text, expected, "{escape} decoded wrongly");
+    }
+
+    // A raw string takes no escapes, so a backslash there is just a character.
+    for source in [r#"'ab\ncd'"#, r#"'ab\qcd'"#, r#"'a\tb'"#] {
+        assert!(run(source).is_ok(), "raw string {source} was rejected");
+    }
+}
+
+/// `\u{HEX}` names one Unicode scalar value. `HEX` is one or more hexadecimal
+/// digits in either case with no fixed width, so every way of writing a code
+/// point is accepted. This is the only way to write a control character below
+/// 0x20 from source.
+#[test]
+fn unicode_escapes_name_one_code_point() {
+    for (source, expected) in [
+        (r#""\u{41}""#, "A"),
+        (r#""\u{00E9}""#, "é"),
+        (r#""\u{1F600}""#, "😀"),
+        (r#""\u{1f600}""#, "😀"),
+        (r#""\u{0041}""#, "A"),
+        (r#""\u{0}""#, "\u{0}"),
+        (r#""\u{7f}""#, "\u{7f}"),
+        (r#""\u{10FFFF}""#, "\u{10FFFF}"),
+        (r#""\u{10fffe}""#, "\u{10FFFE}"),
+        (r#""\u{d7ff}""#, "\u{D7FF}"),
+        (r#""\u{e000}""#, "\u{E000}"),
+        (r#""a\u{41}b""#, "aAb"),
+    ] {
+        let value = run(source).unwrap_or_else(|_| panic!("{source} was rejected"));
+        let Value::Str(text) = value else {
+            panic!("{source} did not produce a string");
+        };
+        assert_eq!(text, expected, "{source} decoded wrongly");
+    }
+}
+
+/// A `\u{...}` naming a value that is not a Unicode scalar is a `ParseError`:
+/// above the last code point, or in the surrogate range.
+#[test]
+fn unicode_escapes_reject_non_scalar_values() {
+    for (source, expected) in [
+        (r#""\u{110000}""#, "above the last code point"),
+        (r#""\u{FFFFFF}""#, "above the last code point"),
+        (r#""\u{FFFFFFFFFFFFFFFF}""#, "above the last code point"),
+        (r#""\u{D800}""#, "surrogate range"),
+        (r#""\u{d800}""#, "surrogate range"),
+        (r#""\u{DBFF}""#, "surrogate range"),
+        (r#""\u{DC00}""#, "surrogate range"),
+        (r#""\u{DFFF}""#, "surrogate range"),
+    ] {
+        assert!(
+            matches!(
+                run(source),
+                Err(Error::Parse(message)) if message.contains(expected)
+            ),
+            "{source} was accepted"
+        );
+    }
+    for source in [
+        r#""\u{}""#,
+        r#""\u{ }""#,
+        r#""\u41""#,
+        r#""\u{41""#,
+        r#""\u{41x}""#,
+        r#""\u{ZZ}""#,
+        r#""\u{-1}""#,
+    ] {
+        assert!(
+            matches!(
+                run(source),
+                Err(Error::Parse(message)) if message.contains("unicode escape")
+            ),
+            "{source} was accepted"
+        );
+    }
+}
+
+/// `lisp_string` is the one place a string becomes source, and it backs `%q`,
+/// `%x` and a nested `%s`. Its contract is that what it writes is a string
+/// literal a person can copy and the reader can read back. Escaping every
+/// control character as `\u{HEX}` is what makes that hold: a raw control byte
+/// does survive `eval`, but it is invisible and unquotable in an editor, and
+/// the C1 block can move a cursor or erase a line on a terminal.
+#[test]
+fn every_control_character_round_trips_through_q_x_and_nested_s() {
+    let mut code_points: Vec<u32> = (0x00..=0x1F).collect();
+    code_points.push(0x7F);
+    code_points.extend(0x80..=0x9F);
+    assert_eq!(code_points.len(), 65, "the C0 block, DEL and the C1 block");
+
+    for code_point in code_points {
+        let literal = format!(r#""\u{{{code_point:X}}}""#);
+        let program = format!(
+            r#"(and
+                 (eq (eval ($ "%q" {literal})) {literal})
+                 (eq (eval ($ "%x" {literal})) {literal})
+                 (eq (eval ($ "%s" [{literal}]))[1] {literal}))"#
+        );
+        let value = run(&program)
+            .unwrap_or_else(|e| panic!("U+{code_point:04X} raised {e:?} instead of a value"));
+        assert!(
+            matches!(value, Value::Bool(true)),
+            "U+{code_point:04X} did not read back through %q, %x and a nested %s"
+        );
+    }
+}
+
+/// The emitted form is pinned so a future change cannot quietly go back to a
+/// raw byte, and so the short escapes are shown to survive.
+#[test]
+fn control_characters_are_rendered_as_unicode_escapes() {
+    let cases: &[(&str, &str)] = &[
+        (r#""\u{0}""#, r#""\u{0}""#),
+        (r#""\u{1}""#, r#""\u{1}""#),
+        (r#""\u{8}""#, r#""\u{8}""#),
+        // 09, 0A and 0D are line feed's neighbours but have their own escapes.
+        (r#""\t""#, r#""\t""#),
+        (r#""\n""#, r#""\n""#),
+        (r#""\r""#, r#""\r""#),
+        (r#""\u{b}""#, r#""\u{B}""#),
+        (r#""\u{c}""#, r#""\u{C}""#),
+        (r#""\u{1f}""#, r#""\u{1F}""#),
+        (r#""\u{7f}""#, r#""\u{7F}""#),
+        (r#""\u{80}""#, r#""\u{80}""#),
+        (r#""\u{9b}""#, r#""\u{9B}""#),
+        (r#""\u{9f}""#, r#""\u{9F}""#),
+    ];
+    for (specifier, name) in [("%q", "q"), ("%x", "x")] {
+        for &(literal, expected) in cases {
+            let Value::Str(rendered) = run(&format!(r#"($ "{specifier}" {literal})"#)).unwrap()
+            else {
+                panic!("%{name} of {literal} was not a string");
+            };
+            assert_eq!(rendered, expected, "%{name} of {literal}");
+            assert!(
+                !rendered.chars().any(char::is_control),
+                "%{name} of {literal} left a raw control byte: {rendered:?}"
+            );
+        }
+    }
+}
+
+/// Escaping stops at the C1 block. Everything above it is written as itself, so
+/// an accented letter, an emoji, a no-break space and a private use character
+/// stay readable rather than turning into a wall of hex.
+#[test]
+fn printable_characters_are_rendered_literally() {
+    for (specifier, name) in [("%q", "q"), ("%x", "x")] {
+        // A printable character needs no escape of its own, so the rendered form
+        // is the content wrapped in quotes and nothing else.
+        for literal in [r#""é""#, r#""😀""#] {
+            let Value::Str(rendered) = run(&format!(r#"($ "{specifier}" {literal})"#)).unwrap()
+            else {
+                panic!("%{name} of {literal} was not a string");
+            };
+            let Value::Str(content) = run(&format!(r#"($ "%s" {literal})"#)).unwrap() else {
+                panic!("%s of {literal} was not a string");
+            };
+            assert_eq!(rendered, format!("\"{content}\""), "%{name} of {literal}");
+        }
+        // Quote and backslash are the two printable characters that do need an
+        // escape, and their own escapes are not unicode escapes.
+        let Value::Str(rendered) = run(&format!(r#"($ "{specifier}" "a\"b\\c")"#)).unwrap() else {
+            panic!("%{name} of a quote and a backslash was not a string");
+        };
+        assert_eq!(
+            rendered, r#""a\"b\\c""#,
+            "%{name} of a quote and a backslash"
+        );
+        // U+00A0, U+00AD and U+10FFFF are not control characters, so they pass
+        // through untouched, and they still read back.
+        for code_point in [0xA0u32, 0xAD, 0x10FFFF] {
+            let literal = format!(r#""\u{{{code_point:X}}}""#);
+            let Value::Str(rendered) = run(&format!(r#"($ "{specifier}" {literal})"#)).unwrap()
+            else {
+                panic!("%{name} of U+{code_point:04X} was not a string");
+            };
+            // The character is written as itself, not spelled out in hex.
+            let ch = char::from_u32(code_point).unwrap();
+            assert_eq!(
+                rendered,
+                format!("\"{ch}\""),
+                "%{name} rewrote U+{code_point:04X}"
+            );
+            assert!(
+                !rendered.contains("u{"),
+                "%{name} escaped U+{code_point:04X} into hex"
+            );
+            let value = run(&format!(
+                r#"(eq (eval ($ "{specifier}" {literal})) {literal})"#
+            ))
+            .unwrap();
+            assert!(matches!(value, Value::Bool(true)));
+        }
+    }
+}
+
+/// Now that source can hold a control character, the interpolations that emit
+/// one raw all read back, because the reader takes a control byte literally.
+/// `%j` is the exception: it writes the brace-less JSON form, which the reader
+/// does not accept, so it fails loudly instead of reading back wrong.
+#[test]
+fn control_characters_round_trip_through_every_specifier_but_json() {
+    for specifier in ["%q", "%x"] {
+        let value = run(&format!(
+            r#"(eq (eval ($ "{specifier}" "\u{{1}}\u{{1F600}}")) "\u{{1}}\u{{1F600}}")"#
+        ))
+        .unwrap();
+        assert!(
+            matches!(value, Value::Bool(true)),
+            "{specifier} did not read back"
+        );
+    }
+    let nested = run(r#"(eq (eval ($ "%s" ["\u{1}"]))[1] "\u{1}")"#).unwrap();
+    assert!(matches!(nested, Value::Bool(true)));
+    let json = run(r#"(eval ($ "%j" "\u{1}"))"#);
+    assert!(
+        matches!(json, Err(Error::Parse(message)) if message.contains("unicode escape")),
+        "%j should be unreadable"
+    );
 }
 
 #[test]

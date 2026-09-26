@@ -269,6 +269,58 @@ struct Tok {
     span: Span,
 }
 
+/// The highest Unicode scalar value, and the first value that is not a scalar.
+const MAX_CODE_POINT: u32 = 0x10FFFF;
+/// The UTF-16 surrogate block. No character has one of these values, so a
+/// `\u{...}` naming one is rejected rather than silently replaced.
+const SURROGATE_FIRST: u32 = 0xD800;
+const SURROGATE_LAST: u32 = 0xDFFF;
+
+/// Read a `\u{HEX}` escape. `i` points just past the `u`, and is advanced past
+/// the closing brace. `HEX` is one or more hexadecimal digits in either case,
+/// with no fixed width, so `\u{41}`, `\u{0041}` and `\u{1f600}` all work.
+fn unicode_escape(cs: &[char], i: &mut usize) -> Result<char, Error> {
+    const SHAPE: &str = "a unicode escape must be written \\u{HEX}";
+    if cs.get(*i) != Some(&'{') {
+        return Err(Error::Parse(SHAPE.into()));
+    }
+    *i += 1;
+    let mut digits = String::new();
+    while let Some(digit) = cs.get(*i).filter(|digit| digit.is_ascii_hexdigit()) {
+        digits.push(*digit);
+        *i += 1;
+    }
+    if cs.get(*i) != Some(&'}') {
+        return Err(Error::Parse(SHAPE.into()));
+    }
+    *i += 1;
+    if digits.is_empty() {
+        return Err(Error::Parse(
+            "a unicode escape needs at least one digit".into(),
+        ));
+    }
+    // Every digit is a hex digit, so the only way the parse can fail is a value
+    // past u32, which is past the last code point.
+    let value = u32::from_str_radix(&digits, 16).map_err(|_| {
+        Error::Parse(format!(
+            "\\u{{{digits}}} is above the last code point {MAX_CODE_POINT:04X}"
+        ))
+    })?;
+    if value > MAX_CODE_POINT {
+        return Err(Error::Parse(format!(
+            "\\u{{{digits}}} is above the last code point {MAX_CODE_POINT:04X}"
+        )));
+    }
+    if (SURROGATE_FIRST..=SURROGATE_LAST).contains(&value) {
+        return Err(Error::Parse(format!(
+            "\\u{{{digits}}} is in the surrogate range {SURROGATE_FIRST:04X} to {SURROGATE_LAST:04X}, \
+             which is not a character"
+        )));
+    }
+    // Unreachable: the two checks above cover every value `char` rejects.
+    char::from_u32(value).ok_or_else(|| Error::Parse(format!("\\u{{{digits}}} is not a character")))
+}
+
 fn lex(src: &str) -> Result<Vec<Tok>, Error> {
     let mut out = Vec::new();
     let cs: Vec<char> = src.chars().collect();
@@ -343,15 +395,18 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
                     }
                     let e = cs[i];
                     i += 1;
-                    s.push(match e {
-                        'n' => '\n',
-                        't' => '\t',
-                        'r' => '\r',
-                        '\\' => '\\',
-                        '"' => '"',
-                        '\'' => '\'',
-                        other => other,
-                    });
+                    match e {
+                        'n' => s.push('\n'),
+                        't' => s.push('\t'),
+                        'r' => s.push('\r'),
+                        '\\' => s.push('\\'),
+                        '"' => s.push('"'),
+                        '\'' => s.push('\''),
+                        'u' => s.push(unicode_escape(&cs, &mut i)?),
+                        other => {
+                            return Err(Error::Parse(format!("unknown escape sequence \\{other}")));
+                        }
+                    }
                 } else {
                     s.push(x)
                 }
@@ -1054,9 +1109,14 @@ fn render(v: &Value) -> String {
         Value::NativeFunction(_) => "<native fn>".into(),
     }
 }
+/// Rendering for a value nested inside an array or a struct (Section 15.2).
+/// A nested string is quoted and escaped, and the escape set is the reader's own
+/// six escapes, so the result can be read back by `eval`. `json_string` is
+/// deliberately not used here: it writes control characters as `\u00XX`, and the
+/// reader has no `\u` escape, so such a string would not survive a round trip.
 fn render_nested(v: &Value) -> String {
     match v {
-        Value::Str(value) => json_string(value),
+        Value::Str(value) => lisp_string(value),
         Value::Ref(loc) => match deref(&loc.root, &loc.path) {
             Ok(value) => render_nested(&value),
             Err(_) => "null".into(),
@@ -2547,12 +2607,12 @@ fn emit_capture(
     }
     let Some(cells) = matches_list.get(match_index - 1) else {
         return Err(Error::Format(format!(
-            "FormatError: match index {match_index} out of range"
+            "match index {match_index} out of range"
         )));
     };
     let Some(cell) = cells.get(capture_index - 1) else {
         return Err(Error::Format(format!(
-            "FormatError: capture index {capture_index} out of range"
+            "capture index {capture_index} out of range"
         )));
     };
     match cell {
@@ -2633,22 +2693,16 @@ fn format_value(args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span: Span
                     }
                     let matches_list = pending.as_ref().ok_or_else(|| {
                         Flow::Error(Error::Format(
-                            "FormatError: capture selector without preceding %~".into(),
+                            "capture selector without preceding %~".into(),
                         ))
                     })?;
                     let match_index: usize = digits.parse().expect("digits are numeric");
                     if match_index < 1 {
-                        return Err(Error::Format(
-                            "FormatError: match index must be at least 1".into(),
-                        )
-                        .into());
+                        return Err(Error::Format("match index must be at least 1".into()).into());
                     }
                     let capture_index: usize = capture_digits.parse().expect("digits are numeric");
                     if capture_index < 1 {
-                        return Err(Error::Format(
-                            "FormatError: capture index must be at least 1".into(),
-                        )
-                        .into());
+                        return Err(Error::Format("capture index must be at least 1".into()).into());
                     }
                     emit_capture(&mut out, matches_list, match_index, capture_index)?;
                     continue;
@@ -2663,15 +2717,12 @@ fn format_value(args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span: Span
                 _ => {
                     let matches_list = pending.as_ref().ok_or_else(|| {
                         Flow::Error(Error::Format(
-                            "FormatError: capture selector without preceding %~".into(),
+                            "capture selector without preceding %~".into(),
                         ))
                     })?;
                     let capture_index: usize = digits.parse().expect("digits are numeric");
                     if capture_index < 1 {
-                        return Err(Error::Format(
-                            "FormatError: capture index must be at least 1".into(),
-                        )
-                        .into());
+                        return Err(Error::Format("capture index must be at least 1".into()).into());
                     }
                     emit_capture(&mut out, matches_list, 1, capture_index)?;
                     continue;
@@ -2879,6 +2930,13 @@ fn json_string(value: &str) -> String {
     escaped.push('\"');
     escaped
 }
+/// Render a string as a `"..."` literal the reader can read back, and a person
+/// can copy. Quote and backslash use their own escapes, and so do line feed,
+/// carriage return and tab. Every other control character, which is C0, DEL and
+/// C1 together, becomes `\u{HEX}`. Anything printable is left alone, so `é` and
+/// an emoji stay as themselves. `\u{HEX}` is an escape of the reader itself
+/// (Section 1.6), so the result is always a valid string literal, and it never
+/// contains a raw byte that would move a cursor or break a line.
 fn lisp_string(value: &str) -> String {
     let mut escaped = String::from("\"");
     for c in value.chars() {
@@ -2888,6 +2946,9 @@ fn lisp_string(value: &str) -> String {
             '\n' => escaped.push_str("\\n"),
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
+            c if c.is_control() => {
+                escaped.push_str(&format!("\\u{{{:X}}}", c as u32));
+            }
             c => escaped.push(c),
         }
     }

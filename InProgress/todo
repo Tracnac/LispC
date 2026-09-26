@@ -89,8 +89,195 @@ Bug
   redesign (span in Flow/Error, delete the global) remains a separate item if ever wanted.
   (was 8)
 
+Code bugs found by the Drift.md audit, re-verified against `1c47835` and re-referenced to current
+line numbers. Provenance is marked `(Drift.md Gn)`. The documentation half of the audit is closed:
+`spec_en.md` is now the source of truth and supersedes `spec.txt` (archived) and `README.md` for
+every A/B/C/D-class item, so those need no work here.
+
+- Resolved: `$` errors no longer print a doubled `FormatError: FormatError:` prefix. The Display arm
+  for `Error::Format` prepends `FormatError: `, and seven raise sites baked the same literal into the
+  message they handed it: the two out-of-range messages in `emit_capture` and, in the format scanner,
+  the missing-`%~` message and the capture-index-below-1 message, each written twice because the
+  scanner has two selector branches. Dropped the literal at all seven; the Display arm is now the only
+  place the string appears, so `grep '"FormatError: '` has exactly one hit. Drift.md G1 claimed twelve
+  sites; seven was the verified count. The one test that asserted the doubled inner message
+  (src/tests/strings.rs, `format_tilde_regex_selectors_require_pending_match`) was asserting the bug —
+  this is Drift.md F4 — so it was corrected, and the missing guard F4 points at was added as
+  `format_errors_never_repeat_the_category_prefix`: it walks 27 error-producing forms of `$` and
+  asserts the *rendered* text contains `FormatError: ` exactly once. 480 tests green debug+release,
+  fmt/clippy clean. spec_en.md §15.11, §18 and Appendix C updated. (Drift.md G1, F4)
+
+- Resolved: `%s` on a nested string used JSON escapes the reader could not parse back, so `eval`
+  silently corrupted data. `render_nested` routed `Value::Str` through `json_string`, which escapes
+  every char ≤ 0x1F as `\u00XX`, while the reader's escape arm dropped the backslash, so `\u0001` read
+  back as the five characters `u0001`. Now calls `lisp_string`, the reader's own escape set, with a
+  comment recording why `json_string` is the wrong choice here. A/B on a fixture holding `a` 0x01 `b`:
+  `(eval ($ "%s" [s]))` gave `Str("au0001b")` with `(eq … s)` false, now gives `Str("a\u{1}b")` with
+  `(eq … s)` true. `%j` is deliberately untouched and still emits `\u0001`. Note the blast radius was
+  narrow: a control character had to be inside a *nested* string, which in practice means one that
+  arrived from `io.read` or from an HTTP body. Because the reader is now strict (G5 below),
+  `(eval ($ "%j" s))` on such a string is a clean `ParseError` rather than a silently wrong value.
+  Both statements are now historical: the `\u{HEX}` escape below lets source produce a control
+  character directly, and a raw control byte in source is legal, so `%q`, `%x` and a nested `%s` all
+  read back. Regression test
+  `nested_percent_s_escapes_with_the_readers_own_escapes` writes the fixture from the test side, since
+  no in-language expression can produce a control character. spec_en.md §15.2 and Appendix C updated.
+  (Drift.md G2, D3)
+
+- Resolved: the lexer dropped the backslash of an unknown escape, so `"\q"` was the string `q` and
+  `"\0"` was the string `0`. Classified in the audit as a design choice rather than a bug, so the
+  direction was put to the user, who chose a `ParseError` over keeping the backslash: a `"..."`
+  string now accepts exactly the six documented escapes and `other => other` is gone. The message
+  names the character, `ParseError: unknown escape sequence \q`. This makes the escape set total and
+  matches how the language already treats an unknown specifier (`%z`), a trailing `%`, and a bad
+  width. Nothing in src/tests or examples relied on the fallthrough. The six accepted escapes are
+  unchanged (verified against a real byte dump: `"a\nb"` writes `a` LF `b`), and a `'...'` raw string
+  still takes no escapes, so `'ab\qcd'` is still the six characters it always was. Two consequences
+  worth knowing: a Windows path such as `"C:\temp"` was always going to be a tab, because `\t` is a
+  real escape, so a raw string is still the way to write it; and a backslash at the very end of the
+  input now reports `unterminated string`, as before. Regression test
+  `unknown_string_escapes_are_a_parse_error`. spec_en.md §1.2, §15.2 and Appendix C updated. Note the
+  new ParseError gets a stale column in the REPL, because the lexer still does not set
+  `PARSE_ERROR_SPAN` — that is the B10 item below, still open. (Drift.md G5)
+
+- Open: a deferred Ctrl-C in the REPL silently swallows the next line typed. The `INTERRUPTED` check
+  sits at the top of the session loop (src/main.rs:1890), before `console.read_line` blocks, so a
+  SIGINT at an idle prompt prints nothing at all; the notice appears only after the user has typed
+  their next line, and that line's result is never echoed — the input is discarded. Re-verified over a
+  pty: after SIGINT at an idle prompt the tty is silent; typing `(add 1 2)` yields
+  `repl: interrupted (:c continues, :q quits)` and no `3`. Fix: make the blocking read itself
+  interruptible so the cancel applies to the line being typed, or check immediately after the read
+  returns and before evaluating. Add a test that drives the `INTERRUPTED` atomic rather than the
+  `REPL_INTERRUPT` hook, which feeds the same top-of-loop branch and so cannot catch this.
+  (Drift.md G3, A11, F2)
+
+- Open: `r+`/`w+` writes land at the reader's prefetch offset, not the logical stream position.
+  src/modules/io.rs:266 does `stream.reader.get_mut().write_all(...)` with no `seek`, and the
+  `BufReader` has already advanced the OS cursor to EOF. Re-verified: a 12-byte file, one `io.read`
+  of `"aaa"`, then `io.write "ZZZ"` produces 15 bytes with `ZZZ` at offset 12, not 4.
+  src/tests/io.rs:179-181 only passes because its fixture is a single short line with no meaningful
+  prefetch. Fix options: (a) drop the `BufReader` for writable handles and use one `File` with an
+  explicit `seek` per operation; (b) track a logical position beside the buffer and seek before each
+  write. (a) is simpler and does not affect read-only buffer reuse. (Drift.md G4, A4, C1)
+
+- Open: `pow` with a negative integer exponent reports `IntegerOverflow`, which is the wrong error.
+  src/main.rs:3147-3152 folds a failed `u32::try_from(-1)` and a genuine `checked_pow` overflow into
+  the same `.ok_or_else(|| IntegerOverflow)`, so `(pow 2 -1)` claims an overflow when the real result is
+  0.5 — `(pow 2.0 -1)` returns 0.5 correctly, so the two paths disagree about what the answer is.
+  Fix: distinguish a negative exponent (a new `MathError` case, or a plain `Math` error) from an actual
+  overflow. (Drift.md G7)
+
+- Open: a missing bracket before a `[` selector is silently reinterpreted as a function call. The
+  postfix parser requires strict adjacency — `token.span.start == e.span.end` (src/main.rs:600-603) —
+  and gives no diagnostic when the guard fails; the bracketed form simply becomes the next argument. So
+  `(p box [1])` reports `ArityError: function expects 1, got 2` instead of anything pointing at the
+  space. This is the single most likely typo in the language and it produces a baffling message. Fix:
+  detect the near-miss in the postfix loop and raise a parse error naming the position and suggesting
+  the adjacent form. (Drift.md G7)
+
+- Open: REPL lexer errors report a column taken from a stale span, putting the caret past the end of
+  the line. Only the parser sets `PARSE_ERROR_SPAN` (src/main.rs:495); the lexer never does, so for a
+  lexer error `repl_diagnostic` (1474-1480) reads whatever the program's own parse left behind and then
+  clamps it with `.min(line.len())`, which yields a column of `len + 1`. Re-verified: typing `"abc` in
+  a session reports `<repl>:1:5` with the caret one past the end of a four-character line, while the
+  same input from a file correctly reports `1:1`. Parser errors are unaffected. Fix: have the lexer set
+  `PARSE_ERROR_SPAN` too, and treat `None` as column 1 rather than as a stale offset.
+  (Drift.md B10)
+
+Diagnostic inconsistencies — real, but low severity, and each is a defensible design choice rather than
+a wrong result:
+
+- Open: `expect` renders its operands with `debug_render` (src/main.rs:2136), so a failure reads
+  `expected Int(2), got Int(1)`. Every other user-facing value rendering in the language goes through
+  `%s`. The semantics are correct; only the rendering is out of step. (Drift.md G6, C5)
+- Open: `break` and `continue` check arity in inverted order. `break` tests `l == 0` first
+  (src/main.rs:2057) and only then `args.len() > 1` (2060); `continue` calls `need(args, 0, ...)` first
+  (2070). Consequence: `(break 1 2)` outside a loop is a `BreakOutsideLoop`, so break's arity error is
+  unreachable outside a loop, while `(continue 1)` is always an arity error. Neither ordering is wrong,
+  but they should match. spec_en.md §12 now documents the asymmetry, so fixing the code means updating
+  that section. (Drift.md A17)
+- Open: the format-error taxonomy is split. A bad fixed width gives a named sub-message
+  (`FormatTypeError: %7b supports widths 8, 16, 32, or 64`, src/main.rs:2752/2768) while an
+  unrepresentable width gives a bare `invalid binary width` (2660) with no sub-message at all. One error
+  class, two shapes. (Drift.md B5)
+
+Dead code — wrong nowhere, but it is a parameter threaded through 15 signatures and never read:
+
+- Open: `match_depth` is passed through `eval`/`call`/`apply_index`/`invoke`/`eval_repl_line`,
+  incremented at src/main.rs:2084-2085 (`m + 1` for the two `match` branches), and then never compared,
+  printed, or branched on anywhere. The `loop_depth` half of the `eval`-inherits-depth rule is real; the
+  `match_depth` half is vestigial. Provable by inspection — no comparison site exists. Removing it
+  touches 15 signatures and the REPL entry point, so it is a mechanical cleanup, not a fix.
+  (Drift.md A14)
+
+Classified NOT code bugs — do not file these as fixes:
+
+- A3 (`validate_module` rejects every non-descriptor member, so a module can never carry a data field)
+  and A7 (`break` in a function called from a loop is `BreakOutsideLoop`, since only the literal `loop`
+  form catches `Flow::Break`) are both stricter than the old spec but internally coherent. Both are now
+  documented as they behave.
+- The remaining G7 rows are documentation gaps, not defects: `(mod 7.0 2)` is a `TypeError` by design,
+  `InvalidShiftCount` is a correct and well-named error, and `(bit-shl 1 63)` overflowing is correct.
+  All three are now in spec_en.md §8 and §15.11.
+- All of A, B, C, D and E is documentation drift, now resolved by spec_en.md.
+- F1-F12 are coverage gaps rather than product bugs, but F1-F5 are *defective tests* — they assert
+  something other than what their names claim, which is precisely why the bugs above survived. F4 is
+  done, as part of the G1 fix above. The rest are worth fixing so the remaining fixes are actually
+  guarded:
+  - F1: `repl_accepts_an_optional_label_and_eof_returns_null` passes a label and never inspects the
+    prompt, and asserts the program value is 2 rather than `Null`. The whole prompt logic is unasserted.
+  - F2: `repl_interrupt_is_contained_to_the_session_and_restored_on_exit` drives the `REPL_INTERRUPT`
+    hook, which feeds the same top-of-loop branch as the real bug, so it cannot fail.
+  - F3: the `/dev/tty` arm is asserted only negatively; the stdout-vs-tty routing is untested.
+  - F4: Resolved with G1. The strings tests asserted inner sub-messages and never the rendered text,
+    so the doubled prefix was structurally invisible. `format_errors_never_repeat_the_category_prefix`
+    now asserts the rendered text for 27 error-producing forms of `$`.
+  - F5: `FormatTypeError` has zero assertions by name, and the width paths have no test at all.
+
 Feature
 =======
+
+- Resolved: `\u{HEX}` escape in a `"..."` string, naming one Unicode scalar value. `HEX` is one or
+  more hex digits in either case with no fixed width and no required leading zeros, so `\u{41}`,
+  `\u{0041}` and `\u{000041}` are the same character. A value above the last code point 10FFFF is
+  refused, and so is the surrogate range D800 to DFFF in either case, because no character has one of
+  those values; a value too long for 32 bits lands in the first message too, since the parse cannot
+  fail any other way once the digits are known to be hex. A malformed form — no brace, no closing
+  brace, a non-hex digit, a space, a minus sign — is one `ParseError` reading `a unicode escape must
+  be written \u{HEX}`, and the empty pair `\u{}` gets `a unicode escape needs at least one digit`.
+  The braces are required: there is deliberately no brace-less form, so the JSON `\u0001` that `%j`
+  writes stays unreadable, and `(eval ($ "%j" s))` on a string with a control character is a
+  `ParseError` rather than a wrong value. That direction was put to the user, who chose the strict
+  braced form over also accepting JSON's. Two old limits fall out of this. The reader can now build a
+  control character from source, which it could not do at all before, so the G2 regression test no
+  longer needs a file fixture to obtain one (it keeps the file, since io.read is how one really
+  arrives). And because a raw control byte is legal in source, `%q`, `%x` and a nested `%s` all read
+  back a string holding one, so `%j` is the only specifier that does not. New tests:
+  `unicode_escapes_name_one_code_point`, `unicode_escapes_reject_non_scalar_values`,
+  `control_characters_round_trip_through_every_specifier_but_json`. spec_en.md gains §1.6, with
+  §1.2, §15.2 and §21.3 updated. (Drift.md D1)
+
+- Resolved: `lisp_string` now emits `\u{HEX}` for every control character, so the specifiers that
+  write a string as source produce valid, copyable Lisp rather than something that merely re-reads.
+  Any control character — C0 (`0x00`-`0x1F`), DEL (`0x7F`) and C1 (`0x80`-`0x9F`), which is exactly
+  Unicode `Cc` and so exactly Rust's `char::is_control` — is written as `\u{HEX}` with uppercase hex
+  digits and no leading zeros: `0x01` is `\u{1}`, `0x0B` is `\u{B}`, `0x7F` is `\u{7F}`, `0x9B` is
+  `\u{9B}`. Line feed, carriage return and tab keep their short escapes `\n`, `\r`, `\t`; they are
+  control characters too, but they already had an escape, and their own form is the readable one.
+  Nothing else is escaped, so `é`, an emoji, U+00A0, U+00AD and U+10FFFF all stay literal and a
+  string of ordinary text comes out looking like itself. The direction was put to the user, who
+  confirmed that exact table. This applies to `%q`, to a string nested in `%x`, and to a string
+  nested in `%s`, because all three go through this one function. `%j` is deliberately untouched and
+  stays JSON with its brace-less `\u0001`. Round-trip tests assert `(eq (eval ($ "%q" v)) v)` and the
+  same for `%x` and a nested `%s` for all 65 control code points, not a sample, and a pinned-form
+  test fixes the emitted text so a future change cannot slip back to a raw byte. New tests:
+  `every_control_character_round_trips_through_q_x_and_nested_s`,
+  `control_characters_are_rendered_as_unicode_escapes`, `printable_characters_are_rendered_literally`.
+  486 tests green debug+release, fmt/clippy clean. spec_en.md §15.3 gains the full table and the
+  rationale, with §1.6, §15.2 and the §15.2 summary row updated. Two things deliberately left:
+  `%v` still uses Rust's own debug escaping, so its `\u{1}` is lowercase hex where the reader's own
+  forms are uppercase — the reader takes both, so this is cosmetic; and `%j` still does not read
+  back, which is correct for JSON.
 
 - Resolved: `use` AST special-case removed — modules are defined and registered in two
   separate steps, and `use` evaluates its argument normally (no AST peek). `(let name {…})`

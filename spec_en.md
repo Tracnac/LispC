@@ -110,18 +110,30 @@ There is no `-NaN` literal, `-NaN` is an ordinary name and gives a `NameError`.
 
 A `"..."` string understands exactly these escapes:
 
-| Escape | Character |
-| ------ | --------- |
-| `\n`   | line feed |
-| `\r`   | carriage return |
-| `\t`   | tab |
-| `\"`   | double quote |
-| `\'`   | single quote |
-| `\\`   | backslash |
+| Escape    | Character |
+| --------- | --------- |
+| `\n`      | line feed |
+| `\r`      | carriage return |
+| `\t`      | tab |
+| `\"`      | double quote |
+| `\'`      | single quote |
+| `\\`      | backslash |
+| `\u{HEX}` | the one character named by `HEX`, see Section 1.6 |
 
-Any other backslash sequence is not an error. The backslash is dropped and the
-character after it is kept. So `"\q"` is the string `q`, `"\0"` is the string `0`,
-`"\x41"` is the string `x41`, and `"\u{1f600}"` is the string `u{1f600}`.
+That list is exact. A backslash followed by anything else is a `ParseError`, and
+the message names the character that was not accepted. So `"\q"` is
+`ParseError: unknown escape sequence \q`, `"\0"` is the same with `0`, and
+`"\x41"` is the same with `x`. Nothing is ever dropped silently.
+
+A backslash as the last character of the input has nothing to escape, so the
+string runs to the end of the input and gives `ParseError: unterminated
+string`. To hold a literal backslash at the end of a string, write it twice.
+A backslash directly before a closing quote escapes that quote, so the string
+continues past it and is then unterminated as well.
+
+`\u{HEX}` is described in Section 1.6. It is the only way to write a control
+character below 0x20 from source, so `"\u{1}"` is a string holding one byte of
+value 1. A raw string is the way to hold a backslash.
 
 A `'...'` raw string has no escapes at all, so `'ab\ncd'` is the eleven
 characters `ab`, a backslash, `n`, `cd`. There is no way to embed a single quote,
@@ -206,6 +218,70 @@ Exactly four values are false:
 
 Everything else is true, including the empty string `""`, the empty array `[]`
 and the empty struct `{}`.
+
+### 1.6 The unicode escape
+
+`\u{HEX}` inside a `"..."` string names exactly one Unicode scalar value. `HEX`
+is one or more hexadecimal digits, in either case, with no fixed width and no
+required leading zeros. So these four are accepted and are the same character:
+
+```
+"\u{41}"  "\u{0041}"  "\u{000041}"  "\u{00e9}"
+```
+
+The last two differ only in case and in the number of leading zeros; neither
+matters. A space is not a hex digit, so it ends the digits: `"\u{4 1}"` is a
+`ParseError`, not the character `A`.
+
+| Written | String |
+| ------- | ------ |
+| `"\u{41}"` | `A` |
+| `"\u{00E9}"` | one character, the two bytes `c3 a9` |
+| `"\u{1F600}"` | the four-byte emoji |
+| `"\u{10FFFF}"` | the last code point there is |
+
+The braces are required. There is no brace-less form, so the JSON escape
+`\u0001` that `%j` writes is a `ParseError`, not a character. See Section 15.2.
+
+A value that is not a Unicode scalar is a `ParseError`, and there are exactly
+two kinds:
+
+| Written | Message |
+| ------- | ------- |
+| `"\u{110000}"` | `\u{110000} is above the last code point 10FFFF` |
+| `"\u{D800}"` | `\u{D800} is in the surrogate range D800 to DFFF, which is not a character` |
+
+The first covers everything from `110000` upwards, including a value too long to
+fit in 32 bits at all. The second covers `D800` to `DFFF` in either case, which
+is the block UTF-16 uses to encode a character above `FFFF`; no character has one
+of those values, so they are refused rather than silently replaced.
+
+A malformed escape is a `ParseError` too, and the message is the same for all
+of them: `a unicode escape must be written \u{HEX}`. That covers `"\u41"` with no
+brace, `"\u{41"` with no closing brace, `"\u{ZZ}"` and `"\u{41x}"` with something
+that is not a hex digit, and `"\u{-1}"`. An empty pair, `"\u{}"`, gets its own
+message, `a unicode escape needs at least one digit`.
+
+A `\u{...}` always produces one character and therefore always well-formed
+UTF-8, which is why `"\u{1F600}"` is four bytes and `"\u{10FFFF}"` is also four
+bytes. There is no way to write an ill-formed byte sequence, and no way to write
+half of a surrogate pair, because the reader builds a character rather than
+copying bytes.
+
+The escape is the reader's own, so the specifiers that write a string as source
+use it. Section 15.3 gives the table: a control character is written as
+`\u{HEX}`, and every printable character is written as itself. `%q`, `%x` and a
+nested `%s` all go through that one table, so a control character survives a
+write and a read unchanged.
+
+A `\u{...}` names a scalar, while string indexing counts grapheme clusters
+(Section 1.4). For a code point outside the Basic Multilingual Plane the two
+agree, because such a code point is always its own cluster:
+
+```
+"\u{1F600}"[1]    ; the emoji
+"\u{1F600}"[2]    ; NameError: string index 2 out of bounds
+```
 
 ---
 
@@ -1231,7 +1307,7 @@ A type that does not fit `%d`, `%b`, `%h`, `%o`, `%f` or `%j` gives a
 | Value | Result |
 | ----- | ------ |
 | a string at the root | the characters themselves, unquoted |
-| a string nested in an array or struct | quoted, JSON escaped |
+| a string nested in an array or struct | quoted, escaped with the escapes of Section 15.3 |
 | a struct key | never quoted |
 | `t` / `f` | `true` / `false` |
 | `_` | the empty string |
@@ -1254,27 +1330,35 @@ position and `<invalid reference>` at the root of `%s`. The literal `null` only
 ever appears for an invalid reference, never for `_`.
 
 Escaping depends on the position. A string at the root is emitted raw, while a
-string nested in an array or a struct is escaped the way JSON escapes, so a
-control character below 0x1F becomes `\u00XX` there. Given a string holding the
-bytes `61 01 62 1f 63`:
+string nested in an array or a struct is quoted and escaped with the reader's
+own escapes. Given a string holding the bytes `61 01 62 1f 63`, so a byte below
+the space and a unit separator inside `a` and `bc`:
 
 ```
 ($ "%s" s)     ; the raw characters, nothing is escaped
-($ "%s" [s])   ; ["a\u0001b\u001fc"]
+($ "%s" [s])   ; ["a\u{1}b\u{1F}c"]
 ($ "%j" s)     ; "a\u0001b\u001fc"
-($ "%q" s)     ; the raw characters
-($ "%x" [s])   ; the raw characters
+($ "%q" s)     ; "a\u{1}b\u{1F}c"
+($ "%x" [s])   ; ["a\u{1}b\u{1F}c"]
 ($ "%v" s)     ; Str("a\u{1}b\u{1f}c")
 ```
 
-`%q` and `%x` only apply the five escapes of Sections 15.3 and 15.4, so they
-pass a control character through unchanged. `%v` uses Rust's own debug
-escaping, which writes `\u{1}` rather than `\u0001`.
+A nested `%s` uses the reader's own escapes and nothing else, so the reader can
+read it back and `(eval ($ "%s" [s]))` is an array whose first element is `s`. A
+control character has no short escape of its own, so it is written as the
+`\u{HEX}` escape of Section 1.6, which the reader also accepts. `%q` and `%x`
+apply the same table, described in Section 15.3, so all three agree.
 
-The reader has no `\u` escape. It drops the backslash of an unknown escape and
-keeps the letter, so `\u0001` reads back as `u0001`. A string holding a control
-character therefore survives `%q` and `%x` but not `%s` on a nested value. See
-Appendix C.
+`%j` is the one that does not read back. It escapes a control character as the
+JSON form `\u0001`, and the reader has no brace-less `\u` escape (Section 1.6), so
+`(eval ($ "%j" s))` on such a string is a `ParseError: a unicode escape must be
+written \u{HEX}` rather than a wrong value. It fails loudly, so the danger is
+losing the step, not reading a corrupted value back. `%j` is JSON, so it is
+deliberately not changed to suit the reader. Use `%s` on a one element array, or
+`%q`, when the result has to be read back.
+
+`%v` uses Rust's own debug escaping, which is not the reader's, so its `\u{1}`
+is lowercase hex where the reader's own forms are uppercase. Both are accepted.
 
 ### 15.3 q
 
@@ -1288,9 +1372,35 @@ reusable by the reader:
 | line feed | `\n` |
 | carriage return | `\r` |
 | tab | `\t` |
+| any other control character | `\u{HEX}` |
 | anything else | itself |
 
-The result re-parses as the same string. References are dereferenced.
+A control character is any character in the Unicode `Cc` category, which is the
+C0 block `0000` to `001F`, DEL at `007F`, and the C1 block `0080` to `009F`.
+Line feed, carriage return and tab are control characters too, but they have
+their own escapes and keep them. Every other one is written as `\u{HEX}`, with
+uppercase hex digits and no leading zeros, so `0x01` is `\u{1}`, `0x0B` is
+`\u{B}`, `0x9B` is `\u{9B}` and `0x7F` is `\u{7F}`.
+
+Nothing else is escaped. An accented letter, an emoji, a no-break space and a
+private use character are all written as themselves, so a string of ordinary
+text comes out looking like itself.
+
+```
+($ "%q" "a\u{1}b")   ; "a\u{1}b"
+($ "%q" "é😀")       ; "é😀"
+($ "%q" "a\"b\\c")   ; "a\"b\\c"
+```
+
+The result re-parses as the same string, and it is also a string a person can
+copy out of a program and paste into source unchanged. Those two properties are
+the point of escaping the control characters rather than passing them through:
+a raw control byte would read back just as well, but it is invisible and
+impossible to quote in an editor, and the C1 block can move a cursor or erase a
+line on a terminal. References are dereferenced.
+
+The same table applies to a string nested in `%x` and in a nested `%s`, because
+all three go through one function. See Sections 15.4 and 15.2.
 
 ### 15.4 x
 
@@ -1422,11 +1532,11 @@ that follow it. A bare `%~` with its two arguments emits nothing.
 | the format is not a string | `TypeError: expected string` |
 | a trailing `%` | `FormatError: trailing %` |
 | an unknown specifier | `FormatError: unknown specifier %z` |
-| a selector with no preceding `%~` | `FormatError: FormatError: capture selector without preceding %~` |
-| a match index below 1 | `FormatError: FormatError: match index must be at least 1` |
-| a capture index below 1 | `FormatError: FormatError: capture index must be at least 1` |
-| a match index out of range | `FormatError: FormatError: match index N out of range` |
-| a capture index out of range | `FormatError: FormatError: capture index N out of range` |
+| a selector with no preceding `%~` | `FormatError: capture selector without preceding %~` |
+| a match index below 1 | `FormatError: match index must be at least 1` |
+| a capture index below 1 | `FormatError: capture index must be at least 1` |
+| a match index out of range | `FormatError: match index N out of range` |
+| a capture index out of range | `FormatError: capture index N out of range` |
 | a capture index that is not a number | `FormatError: invalid capture index` |
 | a bad binary width | `FormatError: FormatTypeError: %7b supports widths 8, 16, 32, or 64` |
 | a bad hexadecimal width | `FormatError: FormatTypeError: %9h supports widths 8, 16, 32, or 64` |
@@ -1440,11 +1550,8 @@ that follow it. A bare `%~` with its two arguments emits nothing.
 | an invalid regex | `InvalidRegex: invalid regex: ...` |
 
 A `FormatError` carries a sub-message. The printed text is the category prefix
-followed by that sub-message. Seven of the places that build a sub-message
-already begin with `FormatError: `, so the prefix appears twice. Those seven are
-the two out of range messages, and, in the selector scanner, the missing `%~`
-message and the capture-index-below-1 message, each of which is written twice
-because the scanner has two selector branches. See Appendix C.
+followed by that sub-message. The sub-message never repeats the prefix, so
+`FormatError: ` appears exactly once in any printed text.
 
 ---
 
@@ -1579,9 +1686,8 @@ ContinueOutsideLoop  BreakOutsideLoop  Interrupted  Quit
 ```
 
 Format errors carry a sub-message. The two are `FormatArityError` for an
-argument count mismatch and `FormatTypeError` for a type or selector problem.
-Some of them already start with `FormatError: `, so the prefix appears twice.
-See Section 15.11.
+argument count mismatch and `FormatTypeError` for a type or selector problem. A
+sub-message never repeats the category prefix. See Section 15.11.
 
 There is no try and catch. The evaluation is fail-fast: the first error stops
 the program, the message goes to stderr, and the exit code is 1. A successful run
@@ -1897,6 +2003,10 @@ lexer reads it as the first character of a name and the name run stops at the
 following bracket. The result is a `NameError` whose message is the single
 invisible mark character, reported on the first line at column 1.
 
+A string in the source is decoded as UTF-8, and a `\u{HEX}` escape always names
+one Unicode scalar value, so a string never holds half a surrogate pair or an
+ill-formed byte sequence. See Section 1.6.
+
 An empty file runs and exits with 0.
 
 ### 21.4 Limits
@@ -2047,14 +2157,6 @@ is auditable. Each item was verified against the interpreter.
   to it fail.
 - `pow 2 -1` reports `IntegerOverflow` rather than anything about exponents.
 - `mod` with a float operand is a `TypeError`.
-- `FormatError` messages on seven sites already begin with `FormatError: `, so
-  the printed message repeats the prefix. Section 15.11 lists them.
-- `%s` escapes a control character below 0x1F as JSON `\u00XX` when the string is
-  nested, while the reader drops the backslash of an unknown escape, so such a
-  string does not survive a `%s` and read-back round trip. `%q` and `%x` leave
-  the character raw and do survive.
-- The lexer silently drops the backslash of an unknown escape, so `"\q"` is the
-  string `q`.
 - `def:` in the REPL has a third message, `defined outside the current source`,
   which spec.txt section 20 does not list.
 - A decoded JSON object keeps its keys in alphabetical order, not in document
