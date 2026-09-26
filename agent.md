@@ -1,0 +1,6 @@
+- Do not use emojis in the code or comments.
+- Do not use directories outside the project root.
+- Code must pass `cargo clippy` and `cargo fmt`.
+- Tests must pass `cargo test`.
+- Don't git push
+- Don't git commit until the code passes all tests and clippy.
