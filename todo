@@ -122,3 +122,5 @@ Feature
   unchanged. `return` stays declaration-only. Spec stays live: `set` into `spec.type` affects
   every subsequent call. 470 tests green (debug+release), fmt/clippy clean; README + spec.txt §2
   document the syntax and the alternatives-vs-overloads distinction. (was the polymorphic-argument hole)
+
+- Target TDC 16.1 CPU (Or explore LLVM)
