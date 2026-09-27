@@ -389,6 +389,164 @@ fn format_type_and_value_of_negative_float() {
 }
 
 #[test]
+fn format_type_and_value_of_scientific_notation() {
+    for (src, expected) in [
+        ("1e3", "float:1000"),
+        ("1E3", "float:1000"),
+        ("1e+3", "float:1000"),
+        ("1E+3", "float:1000"),
+        ("1e-3", "float:0.001"),
+        ("1E-3", "float:0.001"),
+        ("1.5e2", "float:150"),
+        ("1.5e-3", "float:0.0015"),
+        ("-2.5E+4", "float:-25000"),
+        ("1e0", "float:1"),
+        ("1.0e0", "float:1"),
+        ("0.0e0", "float:0"),
+        ("5e-1", "float:0.5"),
+    ] {
+        let format = format!(r#"($ "%t:%s" {src} {src})"#);
+        check(&format, &format!(r#""{expected}""#));
+    }
+}
+
+#[test]
+fn an_exponent_does_not_make_a_literal_an_integer() {
+    // The value being integral is beside the point: the exponent decides the
+    // type, so 1e0 is a float and only a bare 1 is an integer.
+    for (src, expected) in [
+        ("1", "int:1"),
+        ("-42", "int:-42"),
+        ("1.0", "float:1"),
+        ("1e0", "float:1"),
+        ("1.0e0", "float:1"),
+        ("1e3", "float:1000"),
+    ] {
+        let format = format!(r#"($ "%t:%s" {src} {src})"#);
+        check(&format, &format!(r#""{expected}""#));
+    }
+}
+
+#[test]
+fn an_exponent_is_read_the_same_way_by_arithmetic() {
+    // The float is the same value the literal denotes, so it mixes with a
+    // float operand and promotes an integer one.
+    check(r#"(eq 1e3 1000.0)"#, "t");
+    check(r#"(eq 1e3 1000)"#, "t");
+    check(r#"(add 1e0 2)"#, "3.0");
+    check(r#"(mul 1e3 1e3)"#, "1e6");
+    check(r#"(div 1 1e-1)"#, "10.0");
+    check(r#"(pow 1e1 3)"#, "1e3");
+    // It is a float, so an integer-only builtin still refuses it.
+    assert!(matches!(
+        run("(bit-and 1e0 1)"),
+        Err(Error::Type(message)) if message.contains("require integers")
+    ));
+}
+
+#[test]
+fn an_exponent_without_digits_is_rejected() {
+    // The message names the token that failed, which ends at the sign: a second
+    // sign is not part of it, so `1e+-` is reported as `1e+`.
+    for (src, token) in [
+        ("1e", "1e"),
+        ("1E", "1E"),
+        ("2e", "2e"),
+        ("0e", "0e"),
+        ("1e+", "1e+"),
+        ("1e-", "1e-"),
+        ("1E+", "1E+"),
+        ("1E-", "1E-"),
+        ("1.5e", "1.5e"),
+        ("1.0e", "1.0e"),
+        ("1e+-", "1e+"),
+        ("-1e", "-1e"),
+        ("+1e", "+1e"),
+    ] {
+        assert!(
+            matches!(
+                run(src),
+                Err(Error::Parse(message)) if message == format!("invalid number `{token}`")
+            ),
+            "{src} should be rejected as a number with no exponent digits"
+        );
+    }
+}
+
+#[test]
+fn an_exponent_may_not_be_followed_by_a_dot() {
+    // The token ends at the exponent, so this is `1e` with nothing after it and
+    // it is rejected as such rather than read as a field access on a float.
+    assert!(matches!(
+        run("1e.3"),
+        Err(Error::Parse(message)) if message == "invalid number `1e`"
+    ));
+    // The same holds for a mantissa that does have its fraction.
+    assert!(matches!(
+        run("1.5e.3"),
+        Err(Error::Parse(message)) if message == "invalid number `1.5e`"
+    ));
+}
+
+#[test]
+fn radix_literals_are_not_exponent_literals() {
+    // `e` is a hexadecimal digit, so the radix prefix has to be recognised
+    // before an exponent is looked for or every hex literal here would stop
+    // being a number.
+    for (src, expected) in [
+        ("0x1e3", "int:483"),
+        ("0x1E3", "int:483"),
+        ("0xE", "int:14"),
+        ("0xe", "int:14"),
+        ("-0x1e3", "int:-483"),
+        ("-0xE", "int:-14"),
+    ] {
+        let format = format!(r#"($ "%t:%s" {src} {src})"#);
+        check(&format, &format!(r#""{expected}""#));
+    }
+    // Digits that are not valid in the base are still refused, and refused by
+    // the radix path rather than the exponent one.
+    for src in ["0b1e3", "0o1e3", "0x1p3"] {
+        assert!(
+            matches!(
+                run(src),
+                Err(Error::Parse(message)) if message == format!("invalid number `{src}`")
+            ),
+            "{src} should be rejected as an invalid radix literal"
+        );
+    }
+}
+
+#[test]
+fn a_float_name_is_not_read_as_an_exponent_literal() {
+    // f64 parsing would accept all of these, so the exponent is only looked for
+    // in a token that starts with a digit. The capitalised NaN and Inf are the
+    // float literals; these stay names and stay unbound. `-NaN` is not in this
+    // list because it is a literal of its own now, and it is a name for a
+    // different reason: the parser's table is what resolves it.
+    for src in ["inf", "nan", "infinity", "-inf", "-nan", "e3", "E3"] {
+        assert!(
+            matches!(run(src), Err(Error::Name(_))),
+            "{src} should still be a name and not a number"
+        );
+    }
+    check(r#"($ "%t:%s" Inf Inf)"#, r#""float:Inf""#);
+    check(r#"($ "%t:%s" NaN NaN)"#, r#""float:NaN""#);
+}
+
+#[test]
+fn text_after_a_complete_exponent_is_a_separate_token() {
+    // A literal ends at its last digit, exactly as `1.5x` already did, so the
+    // remainder is lexed on its own rather than making the literal malformed.
+    for (src, name) in [("1e3abc", "abc"), ("1e3x", "x"), ("1.5e2abc", "abc")] {
+        assert!(
+            matches!(run(src), Err(Error::Name(message)) if message == name),
+            "{src} should read its literal and then fail on the name {name}"
+        );
+    }
+}
+
+#[test]
 fn format_type_and_value_of_string() {
     check(r#"($ "%t:%s" "text" "text")"#, r#""string:text""#);
 }

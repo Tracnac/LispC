@@ -550,13 +550,33 @@ fn lex_tokens(src: &str, at: &mut usize) -> Result<Vec<Tok>, Error> {
             while i < cs.len() && cs[i].is_ascii_digit() {
                 i += 1;
             }
+            let mut is_float = false;
             if i + 1 < cs.len() && cs[i] == '.' && cs[i + 1].is_ascii_digit() {
                 i += 1;
                 while i < cs.len() && cs[i].is_ascii_digit() {
                     i += 1;
                 }
+                is_float = true;
+            }
+            // An exponent is claimed here even when the mantissa is all digits,
+            // so that the whole of `1e3` is one token instead of a number
+            // followed by the name `e3`. Whether any digits follow the `e` is
+            // not decided here: number() rejects a bare `1e`. A radix literal
+            // cannot reach this, because its prefix letter is what follows the
+            // first digit run, and that letter is `x`, `b` or `o`.
+            if i < cs.len() && matches!(cs[i], 'e' | 'E') {
+                i += 1;
+                if i < cs.len() && matches!(cs[i], '+' | '-') {
+                    i += 1;
+                }
+                while i < cs.len() && cs[i].is_ascii_digit() {
+                    i += 1;
+                }
+                is_float = true;
+            }
+            if is_float {
                 let s: String = cs[start..i].iter().collect();
-                let kind = number(&s)?.expect("decimal float is a number");
+                let kind = number(&s)?.expect("a float literal is a number");
                 out.push(Tok {
                     kind,
                     span: Span {
@@ -634,6 +654,16 @@ fn number(s: &str) -> Result<Option<TokKind>, Error> {
             .parse::<i64>()
             .map(|v| Some(TokKind::Int(v)))
             .map_err(|_| Error::Parse(format!("integer out of range `{s}`")));
+    }
+    // An exponent makes the literal a float even with no dot, so `1e3` is 1000.0
+    // and not the integer 1000. The leading digit is required because the parse
+    // below would otherwise accept `inf` and `nan`, which are names here: the
+    // parser turns only the capitalised NaN and Inf spellings into floats.
+    if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) && rest.contains(['e', 'E']) {
+        return s
+            .parse::<f64>()
+            .map(|v| Some(TokKind::Float(v)))
+            .map_err(|_| Error::Parse(format!("invalid number `{s}`")));
     }
     if rest.contains('.') {
         return s
@@ -717,6 +747,11 @@ impl Parser {
                     "_" => ExprKind::Lit(Literal::Null),
                     "NaN" => ExprKind::Lit(Literal::Float(f64::NAN)),
                     "+NaN" => ExprKind::Lit(Literal::Float(f64::NAN)),
+                    // A NaN carries a sign bit and `-` sets it, the same way it
+                    // picks the negative infinity below. No output can show the
+                    // difference, since float_render and float_source both write
+                    // any NaN as `NaN`.
+                    "-NaN" => ExprKind::Lit(Literal::Float(-f64::NAN)),
                     "Inf" => ExprKind::Lit(Literal::Float(f64::INFINITY)),
                     "+Inf" => ExprKind::Lit(Literal::Float(f64::INFINITY)),
                     "-Inf" => ExprKind::Lit(Literal::Float(f64::NEG_INFINITY)),

@@ -57,7 +57,7 @@ Appendix C. Differences from spec.txt
 | raw string  | `'...'`, no escapes                        | String   |
 | bool        | `t` / `f`                                   | bool     |
 | integer     | `[+-]?` then decimal, `0x` hex, `0b` binary, `0o` octal | i64 |
-| float       | `N.N`                                       | f64      |
+| float       | `N.N`, `N.NeN` or `NeN`                     | f64      |
 | null        | `_`                                         | unit     |
 | array       | `[e1 e2 ...]`, heterogeneous, nestable     | Vec      |
 | struct      | `{k1: v1 k2: v2 ...}`, identifier keys only | ordered map |
@@ -96,15 +96,73 @@ are required:
 
 - `.5` is a `ParseError: unexpected token Dot`.
 - `5.` is a `ParseError: expected struct field after dot`.
-- `1e3` is not a float, it is the name `1e3`.
 - `1_000` is not a number, it is the name `1_000`.
 
-Because there is no exponent notation, a very large or very small float cannot be
-written as a literal. The whole number is still read, so
-`100000000000000000000.0` is accepted and is 1e20.
+A float literal may instead carry an exponent, which is `e` or `E`, then an
+optional `+` or `-`, then at least one digit. The dot is optional, so `1.5e2`
+and `1e2` are both literals. The exponent makes the literal a float even when
+its value is whole, so `1e3` is the float 1000.0 and not the integer 1000, and
+`1e0` is a float where the bare `1` is an integer.
 
-Five float literals are predefined: `NaN`, `+NaN`, `Inf`, `+Inf` and `-Inf`.
-There is no `-NaN` literal, `-NaN` is an ordinary name and gives a `NameError`.
+| Literal   | Value     | Type  |
+| --------- | --------- | ----- |
+| `1e3`     | 1000.0    | float |
+| `1E3`     | 1000.0    | float |
+| `1e+3`    | 1000.0    | float |
+| `1e-3`    | 0.001     | float |
+| `1.5e2`   | 150.0     | float |
+| `1.5e-3`  | 0.0015    | float |
+| `-2.5E+4` | -25000.0  | float |
+| `1e0`     | 1.0       | float |
+| `1.0e0`   | 1.0       | float |
+
+An exponent must have at least one digit, and a literal that starts one without
+finishing it is an error rather than a name:
+
+| Literal | Error |
+| ------- | ----- |
+| `1e` | `ParseError: invalid number \`1e\`` |
+| `1e+` | `ParseError: invalid number \`1e+\`` |
+| `1e-` | `ParseError: invalid number \`1e-\`` |
+| `1e.3` | `ParseError: invalid number \`1e\`` |
+
+`1e.3` is named against `1e` and not against the whole of the source. A literal
+ends at the last digit of its exponent, so the dot was never part of the token
+and the token is rejected before the dot is read at all. The same is true of
+`5.e2`, which is not a literal either: a dot needs a digit after it, so `5.e2`
+is the name `5` and a field access, a
+`TypeError: reference target must be a variable or field`.
+
+A literal ends at its last digit, so anything after it is lexed as a separate
+token, the same as after a decimal float. `1.5x` is the float `1.5` followed
+by the name `x`, and `1e3abc` is the float 1000.0 followed by the name `abc`.
+Neither is a malformed number.
+
+A large or a small float can be written out in full, so
+`100000000000000000000.0` is accepted and is 1e20, as is
+`0.00000000000000000001` at 1e-20. An exponent is a shorter way to say the same
+thing and changes nothing about the value.
+
+Printing does not go the other way. A float is always written out in plain
+decimal and never in exponent notation, so `1e300` prints as a 1 followed by 300
+zeros and `1e3` prints as `1000`. A literal and its own output do not look
+alike, which §15.4 explains.
+
+An exponent does not apply to a radix literal. `e` is a hexadecimal digit, so
+`0x1e3` is the integer 483 and `0xE` is the integer 14. The radix prefixes are
+recognised before an exponent is looked for, which is what keeps those two
+integers.
+
+The lowercase spellings `inf`, `nan` and `infinity` are names, not float
+literals, and neither is `-nan`. Only the capitalised forms below are literals,
+so a float parser that also accepted the lowercase spellings would be wrong
+here.
+
+Six float literals are predefined: `NaN`, `+NaN`, `-NaN`, `Inf`, `+Inf` and
+`-Inf`. A leading `-` negates. On an infinity that picks the other sign, and on
+a NaN it sets the sign bit, which IEEE 754 allows: `-NaN` is a NaN and not a
+different number. No output can show the difference, because every renderer
+writes any NaN as `NaN`, so `-NaN` writes as `NaN` and not as `-NaN`.
 
 ### 1.2 Strings
 
@@ -304,8 +362,15 @@ it ends the name and is then rejected on its own:
 `ParseError: unexpected \`#\``.
 
 The lexer tries to read a number first. If that fails it falls back to reading a
-name. So `0x`, `0b`, `0o`, `1e3` and `1_000` are all names, not numbers. `0X10`
+name. So `0x`, `0b`, `0o` and `1_000` are all names, not numbers. `0X10`
 is a name too, because the numeric prefixes are lowercase only.
+
+A name may start with a digit, as `1a` does, but not with a digit run followed
+by `e` or `E`. That is an exponent, so it is read as the start of a float
+literal, and a literal whose exponent has no digits is an error rather than a
+name. So `1e` is a `ParseError: invalid number \`1e\``, and so are `1ea` and
+`1element`, which are reported against the `1e` they begin with. `1a` is
+unaffected, because `a` is not an exponent marker.
 
 A `let` name and a `fn` parameter name must be a name token. A string, a number
 or a literal in that position is a `TypeError: let name must be an identifier`.
@@ -317,7 +382,7 @@ way, because the lexer stops the name at the dot.
 These names are literals. They cannot be used as a `let` name or as a function
 parameter:
 
-`t`, `f`, `_`, `NaN`, `+NaN`, `Inf`, `+Inf`, `-Inf`.
+`t`, `f`, `_`, `NaN`, `+NaN`, `-NaN`, `Inf`, `+Inf`, `-Inf`.
 
 `let` reports `TypeError: let name must be an identifier` for them, because the
 lexer did not produce a name at all.
@@ -1425,11 +1490,13 @@ all three go through one function. See Sections 15.4 and 15.2.
 `%x` serialises any value into canonical Lisp source, reusable by the reader.
 
 Nested strings use the rules above. Booleans become `t` and `f`. `_` stays `_`.
-Floats use their numeric representation, `NaN`, `Inf` and `-Inf` included. Arrays
-become `[a b c]`. Structs become `{key: value ...}` in insertion order. Functions
-have no source representation and are refused.
+Floats use their numeric representation, `NaN`, `Inf` and `-Inf` included. A NaN
+with the sign bit set writes as `NaN`, so that bit does not survive the trip.
+Arrays become `[a b c]`. Structs become `{key: value ...}` in insertion order.
+Functions have no source representation and are refused.
 
-The result re-parses as a value equal to the original. References are
+The result re-parses as a value equal to the original, the one exception being
+a NaN, which equals nothing at all, itself included. References are
 dereferenced, and an invalid reference propagates a type error.
 
 A float is written in plain decimal, never in exponent notation, so

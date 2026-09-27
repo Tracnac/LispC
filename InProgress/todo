@@ -451,4 +451,49 @@ Feature
   every subsequent call. 470 tests green (debug+release), fmt/clippy clean; README + spec.txt §2
   document the syntax and the alternatives-vs-overloads distinction. (was the polymorphic-argument hole)
 
+- Resolved: scientific notation in float literals, at the user's request. The rule is that an
+  exponent makes a literal a float even when its value is whole, so `1e3` is 1000.0 and `1e0` is a
+  float where a bare `1` is an integer. This is the arithmetic the language already did one case
+  over: `(pow 2 1.5)` had always returned a float, so an integer base never implied an integer
+  result. The exponent is `e` or `E`, an optional `+` or `-`, and at least one digit; the dot stays
+  optional, so `1e2` and `1.5e2` are both literals. The change is two hunks in `lex_tokens` and
+  `number`, following the split the lexer already keeps between a token's extent and its meaning:
+  the fast path claims the exponent so `1e3` is one token instead of the number `1` and the name
+  `e3`, and `number` turns an exponent-bearing token into a float. A malformed exponent is
+  `ParseError: invalid number` naming the token, with the caret at the token start as
+  `integer out of range` puts it, so `1e`, `1e+` and `1e-` are refused rather than quietly read as
+  names. A literal ends at its last digit, so `1e3abc` is the float 1000.0 and then the name `abc`,
+  which is the boundary `1.5x` already had. The exponent is only looked for in a token that starts
+  with a digit, and that gate is load-bearing rather than tidiness: `f64::from_str` accepts `inf`,
+  `nan` and `infinity` case-insensitively, so without it those names would have become floats. A
+  radix literal is unaffected for a related reason, since the prefix letter always follows the first
+  digit run, so `0x1e3` is still the integer 483 and `0xE` the integer 14. This reverses three
+  documented claims: the float row of the type table, "`1e3` is not a float, it is the name `1e3`",
+  and "Because there is no exponent notation". It also costs every name shaped like a digit run
+  then `e` with no digits after it, so `1e`, `1ea` and `1element` are now errors, while `1a`,
+  `1_000`, `0x` and `0X10` are untouched. Printing is deliberately unchanged, a float writes in
+  plain decimal and never as an exponent, so `1e3` writes as `1000` and `1e300` as a 1 and 300
+  zeros. Eight tests, of which the six that lock the behaviour were each confirmed to fail against
+  the pre-change code. spec_en.md §1.1 rewritten, §2.1 extended, the type table and §15.4 updated.
+
+- Resolved: `-NaN` is a float literal, at the user's request. It was a name and gave a `NameError`
+  while `-Inf` has always been a literal, and the asymmetry was syntactic only: a NaN does carry a
+  sign, so `-NaN` is `NaN` with the sign bit set. The rule is now uniform, a leading `-` negates,
+  which on an infinity picks the other sign and on a NaN sets the sign bit. The change is one arm in
+  the parser's literal table, and no lexer change, since `-NaN` already lexed as a single symbol.
+  `-f64::NAN` over `f64::NAN` costs nothing, because no output can see it: `float_render` and
+  `float_source` both collapse any NaN to `NaN` through `is_nan()`, so `%s`, `%f`, `%x`, `%t` and
+  `%v` are byte-identical across `NaN`, `+NaN` and `-NaN`, each checked. The cost is the one place
+  where a literal and its own output disagree in sign, since `-NaN` writes as `NaN` and not as
+  `-NaN`, which spec_en.md §1.1 now says; `-Inf` by contrast keeps its sign in `%s` and `%x`.
+  Comparison is unchanged and IEEE correct: `(eq -NaN -NaN)` is false, as it is for `NaN`, while
+  `(eq -Inf -Inf)` is true. `-NaN` is a reserved literal now, exactly like `-Inf`, so `(let -NaN 1)`
+  is a `TypeError`. `-nan`, `-inf`, `nan`, `inf` and `-infinity` stay names, which is worth a test
+  of its own since `f64::from_str("-NaN")` does succeed. Two new tests, plus the existing non-finite
+  test extended, all three confirmed to fail without the arm; the sign bit itself is asserted on the
+  `f64` with `is_sign_negative`, since no output path can show it. Fixing this also corrected a
+  claim in §15.4 that was already wrong, that `%x` output "re-parses as a value equal to the
+  original", which is false for any NaN since `eq` is false even against itself. 513 tests green
+  debug+release, fmt/clippy clean. spec_en.md §1.1, §2.2 and §15.4.
+
 - Target TDC 16.1 CPU (Or explore LLVM)
