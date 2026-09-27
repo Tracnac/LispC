@@ -36,6 +36,52 @@ fn repl_returns_the_last_evaluated_value_and_resumes_on_continue() {
 }
 
 #[test]
+fn repl_echo_writes_a_function_as_its_own_source() {
+    capture_start();
+    feed(&["dbl", "outer", "str.upper._", ":c"]);
+    run(r#"(use "str")
+           (let dbl (fn (n) (mul n 2)))
+           (let make (fn (n) (fn (x) (add x n))))
+           (let outer (make 10))
+           (repl)"#)
+    .unwrap();
+    REPL_INPUT.with(|queue| *queue.borrow_mut() = None);
+    let out = capture_take();
+    // The echo is the value's `%x` form, so a function can be copied straight
+    // out of a session: the name is a `let` annotation `fn` refuses, so it is
+    // not part of the text, and a closure shows the body it captured into.
+    assert!(
+        out.contains("(fn (n) (mul n 2))"),
+        "the echoed function should be its own source, output was:\n{out}"
+    );
+    assert!(
+        out.contains("(fn (x) (add x n))"),
+        "a closure should show the body it captured into, output was:\n{out}"
+    );
+    assert!(
+        out.contains("str.upper._"),
+        "a native should be its module path, output was:\n{out}"
+    );
+    assert!(
+        !out.contains("<fn>") && !out.contains("<native fn>"),
+        "no function should echo as a placeholder any more, output was:\n{out}"
+    );
+}
+
+#[test]
+fn repl_echo_never_shows_a_placeholder_for_a_function() {
+    capture_start();
+    feed(&["dbl", "(dbl 21)", ":c"]);
+    run("(let dbl (fn (n) (mul n 2)))\n(repl)\n").unwrap();
+    REPL_INPUT.with(|queue| *queue.borrow_mut() = None);
+    let out = capture_take();
+    assert!(
+        out.contains("(fn (n) (mul n 2))") && out.contains("42"),
+        "the echo and the call result should both be there, output was:\n{out}"
+    );
+}
+
+#[test]
 fn repl_set_mutates_program_variables() {
     feed(&["(set a 99)", ":c"]);
     let value = run(r#"(let a 1) (repl) a"#).unwrap();

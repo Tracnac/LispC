@@ -245,11 +245,145 @@ fn formatting_percent_x_follows_references() {
 }
 
 #[test]
-fn formatting_percent_x_rejects_functions() {
-    assert!(matches!(
-        run(r#"($ "%x" (fn () 1))"#),
-        Err(Error::Format(message)) if message.contains("%x cannot serialize function")
-    ));
+fn formatting_percent_x_writes_a_function_as_its_own_source() {
+    check(r#"($ "%x" (fn (y) (add y 1)))"#, r#""(fn (y) (add y 1))""#);
+    check(r#"($ "%x" (fn () 7))"#, r#""(fn () 7)""#);
+    // A body of several forms keeps its block, and a call body keeps the
+    // parentheses that stop `fn` reading it as an immediate call.
+    check(
+        r#"($ "%x" (fn (b) ((let c 1) (add b c))))"#,
+        r#""(fn (b) ((let c 1) (add b c)))""#,
+    );
+    check(
+        r#"($ "%x" (fn (n) (fn (m) (add n m))))"#,
+        r#""(fn (n) (fn (m) (add n m)))""#,
+    );
+    check(
+        r#"($ "%x" (fn (x) (if (eq x 0) (break) x)))"#,
+        r#""(fn (x) (if (eq x 0) (break) x))""#,
+    );
+    check(
+        r#"($ "%x" (fn (x) (str.upper x)))"#,
+        r#""(fn (x) (str.upper x))""#,
+    );
+    // Postfix forms print with no space, and a reference prints its `^` bare,
+    // because that is the only spelling the reader takes back as a reference
+    // rather than as a one-form block.
+    check(r#"($ "%x" (fn (x) (^x)))"#, r#""(fn (x) (^x))""#);
+    check(
+        r#"($ "%x" (fn (x) [1 x "s" {k:1} t _]))"#,
+        r#""(fn (x) [1 x \"s\" {k:1} t _])""#,
+    );
+}
+
+#[test]
+fn formatting_percent_x_of_a_function_never_grows_its_parentheses() {
+    // A parenthesised `(^x)` would read back as a one-form block, so each trip
+    // through `eval` would wrap the body once more.
+    for body in [
+        "(^x)",
+        "(^x[0])",
+        "(add x 1)",
+        "x",
+        "[1 x]",
+        "((let c 1) x)",
+    ] {
+        let once = run(&format!(r#"(let myfn (fn (x) {body})) ($ "%x" myfn)"#)).unwrap();
+        let twice = run(&format!(
+            r#"(let myfn (eval ($ "%x" (fn (x) {body})))) ($ "%x" myfn)"#
+        ))
+        .unwrap();
+        assert!(
+            equals(&once, &twice),
+            "{body} did not print to a fixed point"
+        );
+    }
+}
+
+#[test]
+fn formatting_percent_x_of_a_function_reads_back_as_an_equivalent_function() {
+    check(
+        r#"(let dbl (fn (n) (mul n 2)))
+           (let copy (eval ($ "%x" dbl)))
+           [(copy 21) (dbl 21)]"#,
+        "[42 42]",
+    );
+    // The name is a `let` annotation and `fn` refuses one, so the copy is
+    // anonymous: equal in behaviour, never `eq` to the original.
+    check(
+        r#"(let dbl (fn (n) (mul n 2)))
+           (eq (eval ($ "%x" dbl)) dbl)"#,
+        "f",
+    );
+}
+
+#[test]
+fn formatting_percent_x_drops_the_bindings_a_closure_captured() {
+    // A function value carries its body, not its environment. The text is
+    // valid and reads back, but a name the body closed over is only bound if
+    // the reader happens to have it, and calling the copy then reports it.
+    check(
+        r#"(let make (fn (n) (fn (x) (add x n))))
+           (let closure (make 10))
+           [(($ "%x" closure)) (closure 5)]"#,
+        r#"["(fn (x) (add x n))" 15]"#,
+    );
+    let copied = run(r#"(let make (fn (n) (fn (x) (add x n))))
+           (let closure (make 10))
+           (eval ($ "%x" closure))"#)
+    .unwrap();
+    assert!(
+        matches!(copied, Value::Function(_)),
+        "the copy is a function"
+    );
+    let error = match run(r#"(let make (fn (n) (fn (x) (add x n))))
+           (let closure (make 10))
+           (let copy (eval ($ "%x" closure)))
+           (copy 5)"#)
+    {
+        Err(error) => error,
+        Ok(_) => panic!("a copy with no binding named n cannot be called"),
+    };
+    assert!(matches!(error, Error::Name(name) if name == "n"));
+}
+
+#[test]
+fn formatting_percent_x_writes_a_native_as_its_module_path() {
+    check(r#"(use "str") ($ "%x" str.upper._)"#, r#""str.upper._""#);
+    // A module member read as a value is a descriptor struct, so `%x` reaches
+    // the native inside it and writes the path the reader can follow. A native
+    // is compared by identity, so an `eq` here is a real round trip: the copy
+    // holds the very same callable, not one that merely looks like it.
+    for src in [
+        r#"(eq str.upper._ (eval ($ "%x" str.upper._)))"#,
+        r#"(eq io.write (eval ($ "%x" io.write)))"#,
+        r#"(eq str (eval ($ "%x" str)))"#,
+    ] {
+        check(&format!(r#"(use "io") (use "str") {src}"#), "t");
+    }
+}
+
+#[test]
+fn formatting_percent_x_writes_a_function_nested_in_a_composite() {
+    check(r#"($ "%x" [(fn (a) a) 1])"#, r#""[(fn (a) a) 1]""#);
+    check(r#"($ "%x" {k:(fn (a) a)})"#, r#""{k:(fn (a) a)}""#);
+}
+
+#[test]
+fn formatting_percent_j_still_refuses_a_function() {
+    for src in [
+        r#"($ "%j" (fn (x) x))"#,
+        r#"(use "str") ($ "%j" str.upper._)"#,
+    ] {
+        let error = match run(src) {
+            Err(error) => error,
+            Ok(_) => panic!("%j has no way to encode a function"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "FormatError: FormatTypeError: %j cannot encode function"
+        );
+    }
 }
 
 #[test]

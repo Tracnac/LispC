@@ -1695,8 +1695,6 @@ impl ReplConsole {
 fn repl_echo(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
-        Value::Function(_) => "<fn>".into(),
-        Value::NativeFunction(_) => "<native fn>".into(),
         other => lisp_source(other).unwrap_or_else(|_| debug_render(other)),
     }
 }
@@ -3187,9 +3185,71 @@ fn lisp_source(v: &Value) -> Result<String, Error> {
             .map(|(key, value)| Ok(format!("{key}:{}", lisp_source(value)?)))
             .collect::<Result<Vec<_>, Error>>()
             .map(|fields| format!("{{{}}}", fields.join(" "))),
-        Value::Function(_) | Value::NativeFunction(_) => Err(Error::Format(
-            "FormatTypeError: %x cannot serialize function".into(),
-        )),
+        Value::Function(function) => {
+            let params = function.params.join(" ");
+            Ok(format!("(fn ({params}) {})", expr_source(&function.body)))
+        }
+        Value::NativeFunction(function) => Ok(format!("{}._", function.name)),
+    }
+}
+/// An expression as the Lisp source the reader accepts back.
+///
+/// Three shapes carry weight. A postfix form prints with no space, because the
+/// reader only takes `.` and `[` when the token begins exactly where the
+/// previous one ended. A call always prints parenthesised, because a bare head
+/// would read back as a symbol, and a call used as a function's body needs
+/// those parentheses anyway, because `fn` reads a bare head as the start of its
+/// immediate-call form. A reference prints its `^` bare, because the reader
+/// takes `^` outside a parenthesis too, and a parenthesised `^` form reads back
+/// as a one-form block, so parenthesising it would nest one block deeper on
+/// every round trip.
+fn expr_source(e: &Expr) -> String {
+    match &e.kind {
+        ExprKind::Lit(x) => literal_source(x),
+        ExprKind::Symbol(n) => n.clone(),
+        ExprKind::Field(base, key) => format!("{}.{key}", expr_source(base)),
+        ExprKind::Index(base, spec) => {
+            let selector = match spec {
+                IndexSpec::Selector(selector) => expr_source(selector),
+                IndexSpec::Range(start, end) => {
+                    let start = start.as_ref().map_or_else(String::new, |x| expr_source(x));
+                    let end = end.as_ref().map_or_else(String::new, |x| expr_source(x));
+                    format!("{start}..{end}")
+                }
+            };
+            format!("{}[{selector}]", expr_source(base))
+        }
+        ExprKind::Ref(inner) => format!("^{}", expr_source(inner)),
+        ExprKind::Array(items) => format!(
+            "[{}]",
+            items.iter().map(expr_source).collect::<Vec<_>>().join(" ")
+        ),
+        ExprKind::Struct(fields) => format!(
+            "{{{}}}",
+            fields
+                .iter()
+                .map(|field| format!("{}:{}", field.key, expr_source(&field.value)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        ExprKind::Call(head, args) => {
+            let mut forms = vec![expr_source(head)];
+            forms.extend(args.iter().map(expr_source));
+            format!("({})", forms.join(" "))
+        }
+        ExprKind::Block(forms) => format!(
+            "({})",
+            forms.iter().map(expr_source).collect::<Vec<_>>().join(" ")
+        ),
+    }
+}
+fn literal_source(x: &Literal) -> String {
+    match x {
+        Literal::Null => "_".into(),
+        Literal::Bool(b) => if *b { "t" } else { "f" }.into(),
+        Literal::Int(n) => n.to_string(),
+        Literal::Float(f) => float_source(*f),
+        Literal::Str(s) => lisp_string(s),
     }
 }
 fn debug_render(v: &Value) -> String {

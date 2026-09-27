@@ -1366,7 +1366,7 @@ The result of `$` is always a string.
 | --------- | ------- | -------- |
 | `%s` | any | canonical stringification |
 | `%q` | string | a quoted Lisp string literal, reusable by the reader |
-| `%x` | any except functions | canonical Lisp source, reusable by the reader |
+| `%x` | any | canonical Lisp source, reusable by the reader |
 | `%d` | integer | signed decimal |
 | `%b` | integer | binary, no imposed width |
 | `%h` | integer | lowercase hexadecimal, no `0x` prefix |
@@ -1493,11 +1493,27 @@ Nested strings use the rules above. Booleans become `t` and `f`. `_` stays `_`.
 Floats use their numeric representation, `NaN`, `Inf` and `-Inf` included. A NaN
 with the sign bit set writes as `NaN`, so that bit does not survive the trip.
 Arrays become `[a b c]`. Structs become `{key: value ...}` in insertion order.
-Functions have no source representation and are refused.
 
-The result re-parses as a value equal to the original, the one exception being
-a NaN, which equals nothing at all, itself included. References are
-dereferenced, and an invalid reference propagates a type error.
+A function is written as its own definition, `(fn (parameters) body)`, so a
+function can be copied out of a session and pasted into another one. The name a
+`let` gave it is not part of this text. `fn` takes only a `()` parameter list
+and rejects a name written in front of it with
+`TypeError: fn parameters must use ()`, so a name has nowhere to be written and
+the copy is anonymous. A native function is written as the module path the reader
+can follow, `str.upper._`, which needs the same `use` in the scope it is read in.
+
+A function value carries its body but not the bindings its body closed over, so
+those names are not in the text. The text is still valid and reads back, but the
+copy only works where those names happen to be bound, and calling it otherwise
+raises a `NameError` at the call. A function that references a module needs that
+module `use`d in the scope the copy is read in, which the printed path makes
+visible.
+
+The result re-parses as a value equal to the original, the exceptions being a
+NaN, which equals nothing at all, itself included, and a function, which is
+equal in behaviour and arity but never `eq` to the original, since `eq` on
+functions is identity (Section 10). References are dereferenced, and an invalid
+reference propagates a type error.
 
 A float is written in plain decimal, never in exponent notation, so
 `($ "%x" 100000000000000000000.0)` is `100000000000000000000.0` and reads back
@@ -1629,7 +1645,7 @@ that follow it. A bare `%~` with its two arguments emits nothing.
 | a number expected by `%f` | `FormatError: FormatTypeError: %f expects number` |
 | a string expected by `%q` | `FormatError: FormatTypeError: %q expects string` |
 | strings expected by `%~` | `FormatError: FormatTypeError: %~ expects string` |
-| a function given to `%x` or `%j` | `FormatError: FormatTypeError: %j cannot encode function` |
+| a function given to `%j` | `FormatError: FormatTypeError: %j cannot encode function` |
 | a non-finite float given to `%j` | `FormatError: FormatTypeError: %j cannot encode non-finite float` |
 | the argument count does not match | `FormatError: FormatArityError` |
 | an invalid regex | `InvalidRegex: invalid regex: ...` |
@@ -1864,15 +1880,21 @@ always registers a source context.
 
 Anything that does not start with `:` is evaluated. The value of the last form is
 echoed on the session terminal, unless it is `_`, in which case nothing is
-echoed. The echo uses Lisp source form, so a string is shown with quotes and
-escapes, an array as `[1 2]`, a struct as `{a:1}`, a function as `<fn>` and a
-native function as `<native fn>`:
+echoed. The echo is the value's `%x` form (Section 15.4), so a string is shown
+with quotes and escapes, an array as `[1 2]`, a struct as `{a:1}` and a function
+as its own definition. A function is therefore copyable straight out of a
+session, and a binding name added inside the session with `let` is not part of
+the text, so it can be pasted under any name. A native function is shown as its
+module path, which needs its `use` on the line before it, since the session
+starts with no module in scope:
 
 ```
 > "a string"     ; "a string"
 > [1 2]          ; [1 2]
 > {a: 1}         ; {a:1}
-> (fn (x) x)     ; <fn>
+> (fn (x) x)     ; (fn (x) x)
+> (use "str")    ; the module struct
+> str.upper._    ; str.upper._
 > _              ; nothing
 ```
 
@@ -2278,6 +2300,10 @@ Quick reference. Section 15 is normative.
 | `%x` | `($ "%x" {a: 1})` | `{a:1}` |
 | `%x` | `($ "%x" "a\nb")` | `"a\nb"` |
 | `%x` | `($ "%x" Inf)` | `Inf` |
+| `%x` | `($ "%x" (fn (x) x))` | `(fn (x) x)` |
+| `%x` | `($ "%x" (fn (b) ((let c 1) (add b c))))` | `(fn (b) ((let c 1) (add b c)))` |
+| `%x` | `($ "%x" str.upper._)` | `str.upper._` |
+| `%x` | `($ "%x" [(fn (a) a) 1])` | `[(fn (a) a) 1]` |
 | `%d` | `($ "%d" 42)` | `42` |
 | `%b` | `($ "%b" 5)` | `101` |
 | `%8b` | `($ "%8b" 256)` | `00000000` |
