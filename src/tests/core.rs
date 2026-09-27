@@ -952,3 +952,100 @@ fn eval_failure_keeps_the_diagnostic_pointing_at_the_call() {
         "span should cover the eval call, got {span:?}"
     );
 }
+
+#[test]
+fn expect_compares_by_the_documented_equality_rules() {
+    check(r#"(expect 1 1)"#, r#"t"#);
+    // Comparison is cross-type numeric, so an integer equals the same float.
+    check(r#"(expect 1 1.0)"#, r#"t"#);
+    check(r#"(expect 1.0 1)"#, r#"t"#);
+    check(r#"(expect [1] [1])"#, r#"t"#);
+    check(r#"(expect t t)"#, r#"t"#);
+    // The third argument is accepted and unused on success.
+    check(r#"(expect 1 1 "ok")"#, r#"t"#);
+}
+
+#[test]
+fn an_expectation_failure_reports_both_values_in_debug_form() {
+    for (source, message) in [
+        (
+            r#"(expect 1 2)"#,
+            "expectation failed: expected Int(2), got Int(1)",
+        ),
+        (
+            r#"(expect [1] [2] "differ")"#,
+            "differ: expected Array([Int(2)]), got Array([Int(1)])",
+        ),
+        (
+            r#"(expect "a" "b")"#,
+            r#"expectation failed: expected Str("b"), got Str("a")"#,
+        ),
+        (
+            r#"(expect 1.0 2.5)"#,
+            "expectation failed: expected Float(2.5), got Float(1.0)",
+        ),
+    ] {
+        assert!(
+            matches!(run(source), Err(Error::Expect(actual)) if actual == message),
+            "expected {message:?} for {source}"
+        );
+    }
+}
+
+#[test]
+fn expect_takes_exactly_two_or_three_arguments() {
+    for (source, count) in [
+        (r#"(expect)"#, 0),
+        (r#"(expect 1)"#, 1),
+        (r#"(expect 1 2 3 4)"#, 4),
+        (r#"(expect 1 2 3 4 5)"#, 5),
+    ] {
+        let expected = format!("expect expects 2 or 3 arguments, got {count}");
+        assert!(
+            matches!(run(source), Err(Error::Arity(actual)) if actual == expected),
+            "expected {expected:?} for {source}"
+        );
+    }
+}
+
+#[test]
+fn the_expect_message_argument_must_be_a_string() {
+    for source in [
+        r#"(expect 1 2 5)"#,
+        r#"(expect 1 2 t)"#,
+        r#"(expect 1 2 [1])"#,
+    ] {
+        assert!(
+            matches!(run(source), Err(Error::Type(message)) if message == "expected string"),
+            "expected a string TypeError for {source}"
+        );
+    }
+}
+
+#[test]
+fn expect_compares_functions_by_identity() {
+    check(r#"((let a (fn (x) x)) (expect a a))"#, r#"t"#);
+    // Two closures built from identical source are distinct values, so this
+    // fails. The message is deliberately not asserted: the debug form renders
+    // two distinct functions identically, which is the open item in the todo.
+    assert!(matches!(
+        run(r#"((let a (fn (x) x)) (let b (fn (x) x)) (expect a b))"#),
+        Err(Error::Expect(_))
+    ));
+}
+
+#[test]
+fn reading_a_reserved_or_builtin_name_as_a_value_is_a_name_error() {
+    for (source, name) in [
+        (r#"(let v add)"#, "add"),
+        (r#"(let v let)"#, "let"),
+        (r#"(let v expect)"#, "expect"),
+        (r#"(let v eval)"#, "eval"),
+        (r#"(let v bit-shl)"#, "bit-shl"),
+    ] {
+        assert!(
+            matches!(run(source), Err(Error::Name(actual)) if actual == name),
+            "expected NameError: {name} for {source}"
+        );
+    }
+}

@@ -1,499 +1,164 @@
-Performance
-===========
+Open work
+=========
 
-- Resolved: descriptor spec was re-validated on every module call — validate_descriptor →
-  validate_descriptor_spec (src/main.rs) deep-copied each spec field (spec struct, then
-  documentation/arity/type/return, including full copies of the type and return arrays) per
-  check per call. validate_descriptor_spec now borrows the cells in place (field_cell /
-  spec_borrow, no copy()); every check and error message is unchanged, and the spec is still
-  read live at each call, so `set` into a bound module's descriptor takes effect immediately
-  (locked by a test in src/tests/modules.rs). Benchmark (release, 100k calls to str.upper in a
-  loop, best of 5): 250 ms → 178 ms — the module-call tax dropped ~40% (~0.7 µs/call), with
-  plain-fn and bare-loop baselines unchanged. Residual: an (arity, type) identity cache would
-  remove the remaining scans, but it would go stale if `set` mutates a spec — that belongs
-  with the persistent-representation work below. (was 10)
-
-- Resolved: deep copy on every read — the core cost of the "value semantics with explicit ^
-  aliasing" design. Every variable read, field access, and index did a full recursive copy() of
-  arrays/structs, and every set/bind ran a full O(n) graph walk with fresh HashSets for cycle
-  detection. Model P replaces this: array/struct snapshots are immutable (Rc<Vec<Value>> /
-  Rc<Vec<(String, Value)>>), so reads are O(1)-shallow (shared) clones; a ^ alias is a logical
-  location (root Cell + path, resolved against the current value at read/write time — it never
-  pins an intermediate node, so a whole-value rebind invalidates element/field aliases and they
-  fail deterministically instead of exposing stale data); writes resolve the terminal location
-  (follow cell chains + translate intermediate value aliases: write-through), rebuild the
-  immutable snapshot chain along the path (whole-array/struct copy per level, O(children)), and
-  replace the value in the terminal cell — aliases stay live while rebinds stay isolated. Cycle
-  detection walks only when the written value contains a Ref (all 8 locked cases still say
-  "cyclic reference"; sibling/sibling and helper/root chains now caught via the landing-walk).
-  Benchmark (release, 100k iters, best-of-3, ns/iter; before → after A1–A3 → Model P): bare
-  646→565→627, fn_int 974→891→1002, fn_arr5 1431→1350→1129, fn_arr100 7385→7295→2411 (3.0×),
-  fn_nested5x5 3662→3566→1712 (2.1×), index_read 1154→992→949, field_read 1044→965→1036,
-  nested_read 1148→917→1103, set_elem_scalar 928→664→906, set_nested 1044→671→1040,
-  set_elem_big 10607→4521→2521 (4.2× vs before). The deep-copy tax on array-heavy work is gone
-  (≈3× on fn_arr100, ≈2× on fn_nested5x5); small-scalar cases jitter ±10–60 ns from allocator
-  noise. Residual: each set rebuilds the full array/struct chain at every level (O(children)
-  per level) — a structural-sharing/persistent-Vec (e.g. a 32-way trie) would make array writes
-  sub-linear; and intermediate alias chains make field/nested reads a hair slower than the old
-  flat-cell layout. (was 5)
-
-  The Model P semantics were locked by a 10-area audit (13 tests in src/tests/semantics.rs,
-  caeef52): RefLocation holds only (root Cell + path), root replacement invalidates incompatible
-  paths deterministically, reads/binds/args are value snapshots, aliases write through with
-  replace-at-leaf at final positions, cycles still fail with "cyclic reference", and %v keeps
-  the Ref(...) wrapper while %s/%x/%j/%q deref. The 32-way persistent vector remains a SEPARATE
-  future optimization, deliberately not part of this change. Explicit trigger criteria: re-open
-  the trie only when a REALISTIC write-heavy workload (nested struct transforms / large-array
-  updates in actual scripts) shows `set` consuming more than ~30–40% of runtime; the
-  microbenchmark alone (even set_elem_big, already 4.2× faster) is not sufficient justification.
-  The Rc<Vec> model stays: simple, correct, well-tested (463 tests), and it already delivers the
-  targeted win.
+Every item below was re-verified against `target/release/small-lisp` at `b808131`, not carried
+over from an earlier note. Provenance for the original finding is the `(Drift.md Xn)` tag;
+`InProgress/Drift.md` is the audit those tags point into and is kept as a record of what was
+found, not as a work queue. Finished work and its reasoning are in the commit log, not here.
 
 Bug
 ===
 
-- Resolved: no tail calls and no recursion-depth guard — deep or infinite recursion used to
-  overflow the native stack and abort (panic = "abort") with no diagnostic. The evaluator now
-  bounds call depth: MAX_CALL_DEPTH (2048) nested calls; past that, `RecursionError: call depth
-  limit (2048) exceeded …` points at the offending call (file:line:col + caret) and carries the
-  live call chain (innermost 40 frames, then "… N more frame(s) omitted"). The interpreter runs
-  on a thread with a large explicit stack (256 MB, main()) so the guard — not the native stack —
-  is what bounds recursion; 2048 was calibrated against measured frame costs (~28–44 KB per call
-  level in debug builds, ~6 KB in release; the tree-walker is stack-hungry). Recursion near the
-  limit still works; `loop` remains the unbounded iteration form. Residual: `(eval …)`-driven
-  self-nesting, deeply nested data (copy/render), and deep parser nesting have their own native
-  recursion the call guard does not count. (was 6)
+- Deep nesting overflows the native stack with no diagnostic. `MAX_CALL_DEPTH` (2048) bounds
+  *call* nesting, but the parser, `copy` and the value renderers recurse natively on *data*
+  nesting, which nothing counts. The interpreter thread is given a 256 MB stack
+  (`INTERPRETER_STACK`, `src/main.rs:183`), so deep data is survivable until it is not.
+  Verified: 100 000 nested arrays or nested parens run fine, 500 000 of either dies with `fatal
+  runtime error: stack overflow` and exit -6 (SIGABRT) — no position, no trace, no
+  `RecursionError`. Because the release profile is `panic = "abort"`, this is a hard crash,
+  which is the exact failure the call-depth guard was added to remove; it just survives on the
+  other axis. Fix direction: a nesting counter in the parser with a `RecursionError` shaped like
+  the call guard's, plus one in `copy`/render, with the threshold calibrated against the 256 MB
+  stack rather than guessed.
 
-- Open: tail-call optimization — tail-recursive functions (and their calls inside if/match/
-  block tails) would run in constant stack, making tail recursion unbounded and widening the
-  usable recursion headroom far beyond the guard. The guard above means this is no longer a
-  crash hazard; it is a performance/expressiveness item. (from the item above)
+- `r+`/`w+` writes land at the reader's prefetch offset, not the read position.
+  `src/modules/io.rs:266` does `stream.reader.get_mut().write_all(...)` with no `seek`, and the
+  `BufReader` has already pulled the OS cursor forward. Verified: the write lands on the
+  `BufReader` fill boundary. With `aaa\nbbb\n`, one `io.read` logically consumes 4 bytes and a
+  following write of `ZZZ` lands at offset 8. With a 9005-byte file (`aaa\n` then 9 KB) it lands
+  at offset 8192, which is `BufReader`'s default capacity — an implementation detail of the
+  buffer, not a position the program ever asked for. `src/tests/io.rs:168-181` passes only because
+  its fixture is one 8-byte line, where the prefetch offset and the read position coincide at 8;
+  a two-line fixture fails. Fix options: (a) drop the `BufReader` for writable handles and use
+  one `File` with an explicit `seek` per operation; (b) track a logical position beside the buffer
+  and seek before each write. (a) is simpler and leaves read-only buffering alone.
+  (Drift.md G4, A4, C1)
 
-- Resolved: thread_local bookkeeping + LAST_ERROR_SPAN attribution. Measured (release,
-  wall-clock median-of-5) before committing any fix: the per-node
-  `LAST_ERROR_SPAN` write (eval entry, main.rs:1110) costs ~3% on the most node-dense
-  workload (tight loop 1.00 s → 0.97 s with the write removed) and ~0 on native/scalar
-  paths — and it is ~100% RefCell borrow-check overhead: `std::cell::Cell<Option<Span>>`
-  (Span is Copy) recovers the whole delta (Cell 0.97 s ≈ no-write 0.97 s), so the per-node
-  write stays (it is what makes Lisp-level errors point at the failing node inside a
-  function body). Fragility fixed at the three raise sites that ran "under" a stale span
-  (pointing at the last evaluated argument, not the failing call): arithmetic builtins
-  (call() before `builtin`), native module functions (invoke() before `(f.call)(vals)`),
-  and `$`/format_value (after arg evaluation). Probes before → after (first line:col):
-  `(div 5 0)` 1:8 → 1:1; `(io.open "file:///nonexistent?mode=r")` (with use "io")
-  1:21 → 1:12; `($ "%q")` 1:4 → 1:1. Descriptor (2226) / recursion-guard (2442) /
-  (eval) 2169-2182 already set call_span. Three regression tests in
-  src/tests/errors.rs; 473 tests green debug+release, fmt/clippy clean. CALL_TRACE /
-  LAST_TRACE (push/pop per Lisp call + clone-on-error) and EVAL_SOURCES (per eval
-  boundary) intentionally untouched — off the per-node path and cold; a full span-threaded
-  redesign (span in Flow/Error, delete the global) remains a separate item if ever wanted.
-  (was 8)
+- A missing bracket before a `[` selector is silently read as another argument. `postfix_tail`
+  (`src/main.rs:772-802`) requires strict adjacency, `token.span.start == e.span.end` at lines
+  778 and 800, and gives no diagnostic when the guard fails — the bracketed form simply becomes
+  the next argument. Verified: given `(fn (n) n)`, `(g 7[1])` is `TypeError: indexing requires an
+  array` because adjacency is honoured, but `(g 7 [1])` is `ArityError: function expects 1, got
+  2`, which points at the arity and never at the space. The `.` selector does not fail the same
+  way, which is why this reads as a `[`-only bug: `s. k` works, and a detached `s .k` is
+  `ParseError: unexpected token Dot`. This is the most likely typo in the language and it
+  produces a baffling message. Fix: detect the near-miss in the postfix loop and raise a parse
+  error naming the position and suggesting the adjacent form. (Drift.md G7)
 
-Code bugs found by the Drift.md audit, re-verified against `1c47835` and re-referenced to current
-line numbers. Provenance is marked `(Drift.md Gn)`. The documentation half of the audit is closed:
-`spec_en.md` is now the source of truth and supersedes `spec.txt` (archived) and `README.md` for
-every A/B/C/D-class item, so those need no work here.
+- An `expect` failure can be uninformative, because the debug form it is required to use cannot
+  show identity. This is not a code defect: spec_en.md §11.6:1145-1146 requires both values to
+  use the debug form of §15.9, and `src/main.rs:2402-2405` does exactly that. The consequence is
+  the problem, and it has two faces. §15.9:1568 documents a function's debug form as
+  `Function(b, c)`, its parameter list only, so two distinct closures both built from
+  `(fn (x) x)` produce `expected Function(x), got Function(x)` — verified. The identity rule is
+  honoured and the message still says nothing, which is the one case where the assertion is
+  hardest to debug. Separately, a module member is a descriptor struct rather than a bare
+  function, so comparing `io.write` against a closure puts the entire spec — documentation
+  string, arity, type and return — into the message, verified. The fix is a §15.9 decision
+  rather than a code one: give the debug form some identity marker, or narrow what `expect`
+  renders. It is deliberately left open, and
+  `expect_compares_functions_by_identity` asserts only the pass/fail outcome, not the message,
+  so either fix can land without rewriting the test. (Drift.md G6, C5)
 
-- Resolved: `$` errors no longer print a doubled `FormatError: FormatError:` prefix. The Display arm
-  for `Error::Format` prepends `FormatError: `, and seven raise sites baked the same literal into the
-  message they handed it: the two out-of-range messages in `emit_capture` and, in the format scanner,
-  the missing-`%~` message and the capture-index-below-1 message, each written twice because the
-  scanner has two selector branches. Dropped the literal at all seven; the Display arm is now the only
-  place the string appears, so `grep '"FormatError: '` has exactly one hit. Drift.md G1 claimed twelve
-  sites; seven was the verified count. The one test that asserted the doubled inner message
-  (src/tests/strings.rs, `format_tilde_regex_selectors_require_pending_match`) was asserting the bug —
-  this is Drift.md F4 — so it was corrected, and the missing guard F4 points at was added as
-  `format_errors_never_repeat_the_category_prefix`: it walks 27 error-producing forms of `$` and
-  asserts the *rendered* text contains `FormatError: ` exactly once. 480 tests green debug+release,
-  fmt/clippy clean. spec_en.md §15.11, §18 and Appendix C updated. (Drift.md G1, F4)
+- `break` and `continue` check arity in opposite orders, and spec_en.md documents the result
+  wrongly. `break` (`src/main.rs:2324-2327`) tests `l == 0` before `args.len() > 1`; `continue`
+  (`src/main.rs:2337`) calls `need(args, 0, ...)` first. spec_en.md:1180 says "Outside a loop both
+  report the loop error first, so `(break 1 2)` outside a loop is a `BreakOutsideLoop` and not
+  an arity error." Verified: the `break` half is right, the `continue` half is false. `(break 1 2)`
+  outside a loop is `BreakOutsideLoop`, but `(continue 1)` outside a loop is `ArityError:
+  continue expects 0 arguments, got 1`, not `ContinueOutsideLoop`. The sentence's own example only
+  covers `break`, which is the one form that behaves as claimed, so the wrong half went unnoticed.
+  `(continue)` with no argument does give `ContinueOutsideLoop`, and inside a loop both forms
+  report their arity error, so the divergence is only visible for `(continue 1)` outside a loop.
+  This is a false claim in the source of truth, not only an inconsistency between two defensible
+  orderings, so it is worth deciding which way to go: make `continue` check the loop first, or
+  correct the sentence. Either way one of the two must change. (Drift.md A17)
 
-- Resolved: `%s` on a nested string used JSON escapes the reader could not parse back, so `eval`
-  silently corrupted data. `render_nested` routed `Value::Str` through `json_string`, which escapes
-  every char ≤ 0x1F as `\u00XX`, while the reader's escape arm dropped the backslash, so `\u0001` read
-  back as the five characters `u0001`. Now calls `lisp_string`, the reader's own escape set, with a
-  comment recording why `json_string` is the wrong choice here. A/B on a fixture holding `a` 0x01 `b`:
-  `(eval ($ "%s" [s]))` gave `Str("au0001b")` with `(eq … s)` false, now gives `Str("a\u{1}b")` with
-  `(eq … s)` true. `%j` is deliberately untouched and still emits `\u0001`. Note the blast radius was
-  narrow: a control character had to be inside a *nested* string, which in practice means one that
-  arrived from `io.read` or from an HTTP body. Because the reader is now strict (G5 below),
-  `(eval ($ "%j" s))` on such a string is a clean `ParseError` rather than a silently wrong value.
-  Both statements are now historical: the `\u{HEX}` escape below lets source produce a control
-  character directly, and a raw control byte in source is legal, so `%q`, `%x` and a nested `%s` all
-  read back. Regression test
-  `nested_percent_s_escapes_with_the_readers_own_escapes` writes the fixture from the test side, since
-  no in-language expression can produce a control character. spec_en.md §15.2 and Appendix C updated.
-  (Drift.md G2, D3)
+- The format-error taxonomy is split into two shapes. A width that parses but is unsupported
+  gives a named sub-message; a width too large for `usize` gives a bare one that names neither
+  the specifier nor the width. Both are `Error::Format`, so both render as `FormatError: <msg>`.
+  Verified: `($ "%7b" 1)` is `FormatTypeError: %7b supports widths 8, 16, 32, or 64`
+  (`src/main.rs:3010`, and `:3026` for `%h`), while `($ "%99999999999999999999b" 1)` is the bare
+  `invalid binary width` (`src/main.rs:2921`, a `digits.parse::<usize>()` failure). An earlier
+  note in this file used `%5b` as the bare example, which is wrong: `%5b` gives the named
+  message like any other in-range width. Only `b` and `h` accept a width at all, which was
+  checked across every specifier: on `d`, `s`, `o`, `x`, `f`, `j`, `t`, `v`, `q`, `g` and `e` a
+  numeric width is not a selector at all and gives `capture selector without preceding %~`.
+  The bare half is also the one the spec never mentions: the error sub-message table at
+  spec_en.md:1618-1636 has eighteen rows and none of them is `invalid binary width`, so a
+  message the implementation can emit is absent from the source of truth. Fixing the taxonomy
+  means adding that row, naming the specifier in the parse failure, or folding both shapes into
+  the named one. Locked by `a_width_too_large_to_parse_is_reported_without_a_sub_message`,
+  which asserts the current bare text exactly, so a change to either shape has to touch the
+  test deliberately. (Drift.md B5)
 
-- Resolved: the lexer dropped the backslash of an unknown escape, so `"\q"` was the string `q` and
-  `"\0"` was the string `0`. Classified in the audit as a design choice rather than a bug, so the
-  direction was put to the user, who chose a `ParseError` over keeping the backslash: a `"..."`
-  string now accepts exactly the six documented escapes and `other => other` is gone. The message
-  names the character, `ParseError: unknown escape sequence \q`. This makes the escape set total and
-  matches how the language already treats an unknown specifier (`%z`), a trailing `%`, and a bad
-  width. Nothing in src/tests or examples relied on the fallthrough. The six accepted escapes are
-  unchanged (verified against a real byte dump: `"a\nb"` writes `a` LF `b`), and a `'...'` raw string
-  still takes no escapes, so `'ab\qcd'` is still the six characters it always was. Two consequences
-  worth knowing: a Windows path such as `"C:\temp"` was always going to be a tab, because `\t` is a
-  real escape, so a raw string is still the way to write it; and a backslash at the very end of the
-  input now reports `unterminated string`, as before. Regression test
-  `unknown_string_escapes_are_a_parse_error`. spec_en.md §1.2, §15.2 and Appendix C updated. Note the
-  new ParseError gets a stale column in the REPL, because the lexer still does not set
-  `PARSE_ERROR_SPAN` — that was the B10 item below, now resolved. (Drift.md G5)
+Diagnostic timing, a documented choice rather than a defect:
 
-- Resolved: a deferred Ctrl-C in the REPL silently swallowed the next line typed. The `INTERRUPTED`
-  check sat at the top of the session loop, before `console.read_line` blocks, so a SIGINT at an idle
-  prompt printed nothing at all; the flag survived until the *next* line was evaluated, where
-  `check_interrupted` turned it into `Error::Interrupted` and the `Error::Interrupted` arm cancelled
-  that line — so the notice appeared only after the user typed their next line, and that line's result
-  was never echoed. Verified over a pty before the fix: after SIGINT at an idle prompt the tty is
-  silent; typing `(add 1 2)` yields `repl: interrupted (:c continues, :q quits)` and no `3`.
-  The fix keeps the data loss out without making the read interruptible, because a blocked read cannot
-  be woken by a signal here: `std` retries `EINTR` internally, so there is no way to observe the signal
-  before the read returns. The session now checks for a pending interrupt again immediately after the
-  read returns and before evaluating, reports the notice, and then evaluates the line in hand. That is
-  the correct line to evaluate, because the tty driver flushes its input queue on Ctrl-C (VINTR), so
-  whatever was being typed is already gone and the read returns the line typed *after* the cancel.
-  Re-verified over a pty after the fix, all three positions: Ctrl-C at an idle prompt then `(add 1 2)`
-  echoes `3`; Ctrl-C with `(add 1 ` typed, then `2)` Enter, evaluates the fragment `2)` and reports
-  `unexpected token RParen`, which is what a real REPL does with a fragment typed after a cancel; and
-  Ctrl-C during a 400M-iteration `loop` printed the notice and left the session usable. A Ctrl-C
-  during evaluation used to cancel that line, on the `Error::Interrupted` arm; that arm is gone, see
-  the Ctrl-C feature entry below, which supersedes that half of this fix.
-  New per-thread test hook `REPL_INTERRUPT_AFTER_READ`, mirroring `REPL_INTERRUPT`, for the position
-  the old hook cannot reach; both are saved and restored by `InterruptedGuard`. Regression tests
-  `repl_interrupt_before_the_prompt_is_reported_and_redraws`,
-  `repl_interrupt_during_the_read_keeps_the_line_that_follows_it` and
-  `repl_interrupt_hooks_are_restored_when_the_session_ends`, each asserting the whole captured session
-  transcript. spec_en.md §20.10 rewritten with a three-row table of where the keypress lands, and
-  Appendix C items 9 and the deferred-notice bullet added. (Drift.md G3, A11, F2)
+- A Ctrl-C that lands during a blocking read is noticed when the read returns, so the notice
+  appears after the user's next Enter. `read_line` (`src/modules/io.rs:230-239`) calls
+  `check_interrupted()` before and after the read, and `std` retries `EINTR` internally, so the
+  signal cannot be observed before the read returns. Making it immediate needs either a
+  poll/select loop on the tty (a dependency or hand-written FFI) or I/O from the `ctrlc` handler
+  thread, which `ctrlc` does permit, plus a session-owned terminal handle and coordination against
+  the prompt. The user chose the data-loss fix only, and spec_en.md §20.10 and Appendix C state
+  the timing, so the behaviour is documented rather than implied. (Drift.md G3 residual)
 
-- Residual, by choice: the notice for a Ctrl-C that lands during a read is printed when that read
-  returns, not at the moment of the keypress, so the user sees it after their next Enter. Making it
-  immediate needs either a poll/select loop on the tty (a new dependency or hand-written FFI) or I/O
-  from the `ctrlc` handler thread, which `ctrlc` does allow since it runs the closure off the signal
-  context, but that needs a session-owned terminal handle plus coordination against the prompt. The
-  user chose the data-loss fix only. spec_en.md §20.10 and Appendix C state the timing, so the behaviour
-  is documented rather than implied.
+Performance
+===========
 
-- Open: `r+`/`w+` writes land at the reader's prefetch offset, not the logical stream position.
-  src/modules/io.rs:266 does `stream.reader.get_mut().write_all(...)` with no `seek`, and the
-  `BufReader` has already advanced the OS cursor to EOF. Re-verified: a 12-byte file, one `io.read`
-  of `"aaa"`, then `io.write "ZZZ"` produces 15 bytes with `ZZZ` at offset 12, not 4.
-  src/tests/io.rs:179-181 only passes because its fixture is a single short line with no meaningful
-  prefetch. Fix options: (a) drop the `BufReader` for writable handles and use one `File` with an
-  explicit `seek` per operation; (b) track a logical position beside the buffer and seek before each
-  write. (a) is simpler and does not affect read-only buffer reuse. (Drift.md G4, A4, C1)
+- Each `set` rebuilds the immutable snapshot chain at every level it passes, O(children) per
+  level, so an array or struct write is linear in the children along the path. A structural-
+  sharing persistent vector (a 32-way trie was the shape considered) would make array writes
+  sub-linear. The trigger criteria are unchanged and deliberately conservative: re-open this only
+  when a *realistic* write-heavy workload — nested struct transforms, large-array updates in
+  actual scripts — shows `set` consuming more than roughly 30-40% of runtime. The microbenchmark
+  alone is not sufficient justification, even though `set_elem_big` is already 4.2x faster than
+  before Model P. The `Rc<Vec>` model stays until then: simple, correct, and well tested.
 
-- Resolved: `pow` with a negative integer exponent reported `IntegerOverflow`, which is the wrong
-  error. The integer path folded a failed `u32::try_from(-1)` and a genuine `checked_pow` overflow into
-  the same `.ok_or_else(|| IntegerOverflow)`, so `(pow 2 -1)` claimed an overflow when the real result
-  is 0.5. `(pow 2.0 -1)` returned 0.5 correctly, so the two paths disagreed about the answer to the
-  same question. The user chose the float answer, which is what the language already did for the
-  adjacent case: `(pow 2 1.5)` had always returned a float, so an integer base never implied integer
-  arithmetic, and a negative exponent was the only exponent that errored. Only a non-negative exponent
-  now takes the integer path; a negative one falls through to `powf`, so `(pow 2 -1)` is 0.5,
-  `(pow 2 -2)` is 0.25, and `(pow 0 -1)` is `Inf` as `(pow 0.0 -1)` always was.
-  A genuine overflow is untouched and is still `IntegerOverflow`: `(pow 2 63)` and `(pow 2 64)`
-  overflow, and the boundary is exact — `(pow -2 63)` is `i64::MIN` and fits, `(pow -2 64)` overflows.
-  The float path never overflows, it saturates, so `(pow 2.0 1000)` is a very large float.
-  Three tests: `pow_uses_integer_arithmetic_only_for_a_non_negative_integer_exponent` asserts the type
-  as well as the value, since the rule is about which arithmetic ran;
-  `pow_still_reports_a_genuine_integer_overflow` guards the change against over-reaching, and passes
-  both before and after by design; `pow_by_a_negative_exponent_of_zero_is_infinite` covers zero.
-  spec_en.md §15 with a worked table, the builtin table row, and the Appendix C bullet removed.
-  (Drift.md G7)
+- Module-call spec validation is still re-read on every call. An (arity, type) identity cache
+  would remove the remaining scans, but it would go stale if `set` mutates a spec descriptor.
+  That belongs with the persistent-representation item above rather than landing alone.
 
-- Open: a missing bracket before a `[` selector is silently reinterpreted as a function call. The
-  postfix parser requires strict adjacency — `token.span.start == e.span.end` (src/main.rs:600-603) —
-  and gives no diagnostic when the guard fails; the bracketed form simply becomes the next argument. So
-  `(p box [1])` reports `ArityError: function expects 1, got 2` instead of anything pointing at the
-  space. This is the single most likely typo in the language and it produces a baffling message. Fix:
-  detect the near-miss in the postfix loop and raise a parse error naming the position and suggesting
-  the adjacent form. (Drift.md G7)
+- Tail calls. A call in tail position — in a function body, or in the tail of an `if`, `match`
+  or `block` — would run in constant stack, making tail recursion unbounded and widening the
+  usable recursion headroom well past `MAX_CALL_DEPTH` (2048). This is no longer a crash
+  hazard; the depth guard removed that, so it is a performance and expressiveness item.
 
-- Resolved: REPL lexer errors reported a column taken from a stale span, putting the caret past the end
-  of the line. Only the parser set `PARSE_ERROR_SPAN`; the lexer never did, so for a lexer error
-  `repl_diagnostic` read whatever the program's own parse left behind and then clamped it with
-  `.min(line.len())`, which yields a column of `len + 1`. Re-verified: typing `"abc` in a session
-  reported `<repl>:1:5` with the caret one past the end of a four-character line, while the same input
-  from a file reported `1:1`. Root cause found while fixing it: the byte-offset table was built *after*
-  the token loop, on the success path only, so a lexer error had no correct span available at all. `lex`
-  is now a wrapper that builds the table up front, clears `PARSE_ERROR_SPAN` first, and stamps the start
-  of the token being read on failure; the token loop itself moved to `lex_tokens` and reports its current
-  character index through an out-parameter, since the loop counts characters and has no business knowing
-  the diagnostics slice with byte offsets. Every lexer error now points at the start of its own token:
-  `unterminated string`, `unknown escape sequence \q`, the three `\u{...}` errors, and `unclosed
-  array` all report the offending token's column. Parser errors are byte-for-byte unchanged, and the
-  `(eval "...")` path still reports at the `eval` call, because that arm deliberately clears the span.
-  A side effect worth keeping: a lexer error after a non-ASCII prefix is now positioned correctly,
-  where before it was clamped to column 1 — `"éé" "abc` reports column 6, the second quote. Regression
-  tests `lexer_errors_point_at_their_own_token_and_never_at_a_stale_span` (five sources, each after a
-  real span is left behind at a larger offset), `lexer_error_columns_count_characters_not_bytes`, and
-  `repl_lexer_errors_are_not_reported_against_the_previous_line` (a full session transcript, with the
-  error deliberately not in column 1 so a stale span and a cleared one differ). All three were confirmed
-  to fail against the pre-fix code. spec_en.md §18 and §20.8 updated. (Drift.md B10)
+Design limitation
+=================
 
-Diagnostic inconsistencies — real, but low severity, and each is a defensible design choice rather than
-a wrong result:
+- A function cannot be copied back out of a session. `%s` writes `<fn>` and `%x` refuses with
+  `FormatTypeError: %x cannot serialize function`. spec_en.md §20.2 documents `<fn>` in a table,
+  so under the current source of truth there is no drift to fix. It is recorded here because it
+  is a real limitation and a reasonable thing to revisit, not because it is a defect.
 
-- Open: `expect` renders its operands with `debug_render` (src/main.rs:2136), so a failure reads
-  `expected Int(2), got Int(1)`. Every other user-facing value rendering in the language goes through
-  `%s`. The semantics are correct; only the rendering is out of step. (Drift.md G6, C5)
-- Open: `break` and `continue` check arity in inverted order. `break` tests `l == 0` first
-  (src/main.rs:2057) and only then `args.len() > 1` (2060); `continue` calls `need(args, 0, ...)` first
-  (2070). Consequence: `(break 1 2)` outside a loop is a `BreakOutsideLoop`, so break's arity error is
-  unreachable outside a loop, while `(continue 1)` is always an arity error. Neither ordering is wrong,
-  but they should match. spec_en.md §12 now documents the asymmetry, so fixing the code means updating
-  that section. (Drift.md A17)
-- Open: the format-error taxonomy is split. A bad fixed width gives a named sub-message
-  (`FormatTypeError: %7b supports widths 8, 16, 32, or 64`, src/main.rs:2752/2768) while an
-  unrepresentable width gives a bare `invalid binary width` (2660) with no sub-message at all. One error
-  class, two shapes. (Drift.md B5)
+Considered and dropped
+======================
 
-Dead code — wrong nowhere, but it was a parameter threaded through 9 signatures and never read:
+Recorded so the next reader knows these were re-checked rather than overlooked.
 
-- Resolved: `match_depth` was passed through `eval`/`call`/`apply_index`/`range_positions`/`values`/
-  `define_let`/`eval_repl_line`/`run_repl`/`invoke`/`format_value`, incremented at the two `match`
-  branches, and then never compared, printed, or branched on anywhere. The `loop_depth` half of the
-  `eval`-inherits-depth rule is real; the `match_depth` half was vestigial. Provable by inspection —
-  no comparison site existed. Removed from all 9 signatures and every call site, in `src/main.rs`,
-  `src/tests/mod.rs` and `src/tests/repl.rs`. (Drift.md A14)
-- The removal caught a real trap, which is why it is worth recording. The `match` arm read
-  `eval(&p[0], env, l, m + 1)`: the `m + 1` was a naive `, l, m` rewrite turned into `l + 1`, which
-  incremented `loop_depth` instead. `break_inside_match_inside_loop_exits_the_loop` failed, because a
-  `break` inside a `match` started counting as inside a loop. The lesson is that the two parameters
-  are interchangeable to a textual rewrite and not interchangeable in meaning; the test that
-  distinguishes them is the one that already existed.
-- A sweep for the same shape found nothing else. `call_span` and `execution_span` forward a lot too,
-  but both terminate in real reads (`LAST_ERROR_SPAN.set`, `CALL_TRACE.push`, `repl_prompt`). There is
-  no `#[allow(dead_code)]` anywhere, no TODO/FIXME/unimplemented marker, and no unused const, which
-  rustc would flag.
-
-Classified NOT code bugs — do not file these as fixes:
-
-- A3 (`validate_module` rejects every non-descriptor member, so a module can never carry a data field)
-  and A7 (`break` in a function called from a loop is `BreakOutsideLoop`, since only the literal `loop`
-  form catches `Flow::Break`) are both stricter than the old spec but internally coherent. Both are now
-  documented as they behave.
-- The remaining G7 rows are documentation gaps, not defects: `(mod 7.0 2)` is a `TypeError` by design,
-  `InvalidShiftCount` is a correct and well-named error, and `(bit-shl 1 63)` overflowing is correct.
-  All three are now in spec_en.md §8 and §15.11. The fourth G7 row, `pow` with a negative exponent, was
-  filed here too and turned out not to be a documentation gap at all — the user showed that the two
-  `pow` paths disagreed about the same answer, which no amount of documenting makes coherent. It is
-  resolved above.
-- All of A, B, C, D and E is documentation drift, now resolved by spec_en.md.
-- Re-confirmed as not-a-bug during the REPL pass, not changed: the echo of a function is `<fn>` and a
-  native function is `<native fn>`, not the lisp form. spec.txt asked for the lisp form; spec_en.md §20.2
-  documents `<fn>` in a table, so under the current source of truth there is no drift to fix. It does
-  mean a function cannot be copied back out of a session, which is a real limitation and a reasonable
-  thing to revisit, but it is a documented design choice rather than a defect.
-- F1-F12 are coverage gaps rather than product bugs, but F1-F5 are *defective tests* — they assert
-  something other than what their names claim, which is precisely why the bugs above survived. F4 is
-  done, as part of the G1 fix above. The rest are worth fixing so the remaining fixes are actually
-  guarded:
-  - F1: Resolved. `repl_accepts_an_optional_label_and_eof_returns_null` passed a label and never
-    inspected the prompt, and asserted the program value was 2 rather than `Null`. It now asserts
-    `breakpoint@<test>:2> ` for a labelled session, `<test>:1> ` with no `@` for an unlabelled one, and
-    `Null` from a bare `(repl)` on EOF, keeping the `:c` case as a separate assertion.
-  - F2: Resolved with G3. The old test drove `REPL_INTERRUPT`, which feeds the same top-of-loop branch
-    as the real bug, so it could not fail. It is now `repl_interrupt_before_the_prompt_is_reported_and_redraws`
-    and asserts the full transcript, joined by the two after-read tests above. Note the limit recorded
-    in the G3 residual: a faithful unit test of the swallow needs the process-wide `INTERRUPTED` atomic,
-    which is unsafe to set in a 500-test parallel suite, so the after-read tests drive the per-thread
-    hook and lock the notice placement and that the line runs. The real-flag path was verified over a
-    pty instead. Putting a hook in `check_interrupted` was rejected: it ran on every function call and
-    every loop iteration. It no longer does — it is only called around the blocking reads in `io.rs`
-    now — but the rejected shape does not come back, because the evaluator checks an atomic directly.
-  - F3: Resolved. The `/dev/tty` arm was asserted only negatively, so the stdout-vs-tty routing was
-    untested. `ReplConsole` now exposes the decision as `ReplSink` (`Captured`, `ProgramStdout`,
-    `ProgramStderr`, `Terminal`) through `echo_sink`/`notify_sink`, which the write methods dispatch on,
-    so the routing table is a testable value rather than a shape buried in two `match`es. Three tests
-    cover it, and the terminal arm is exercised for real by constructing a `Tty` console over a
-    temporary file, since the routing does not care which file it is: the bytes are asserted to land
-    there and nowhere else, and `repl_capture_hook_never_hijacks_a_real_session` locks that a collecting
-    capture hook does not divert a terminal session into a buffer.
-  - F4: Resolved with G1. The strings tests asserted inner sub-messages and never the rendered text,
-    so the doubled prefix was structurally invisible. `format_errors_never_repeat_the_category_prefix`
-    now asserts the rendered text for 27 error-producing forms of `$`.
-  - F5: `FormatTypeError` has zero assertions by name, and the width paths have no test at all.
-
-Feature
-=======
-
-- Resolved: Ctrl-C opens a session at the point it interrupted, instead of ending the run. This is
-  the user's request, and it also removes a data-loss bug the old behaviour caused in `io.read`. The
-  change is small: `check_interrupted` became `interrupt_into_repl`, the two evaluator check sites
-  (`eval`, and the `loop` arm of `call`) now pass the scope, the loop depth and the current span, and
-  the flag is consumed before the session installs its guard, so `:c` cannot come straight back into
-  another session. `run_repl` was split into `run_repl_on`, which takes an already-open console and an
-  optional preface, so the notice can be printed before the first prompt of a session nobody asked
-  for. `:c` resumes the interrupted computation, `:q` ends the run with `Quit` as in any session, and
-  Ctrl-C inside a session opens a nested one, so a program that will not finish is stopped by typing
-  `:q` rather than by pressing Ctrl-C twice. Sessions nest exactly as `(repl)` nests.
-- The session is opened with the scope that was live where the interrupt landed, which is what makes
-  the feature worth having. The `loop` check hands over the loop's own scope, so the counter can be
-  read and corrected: verified over a pty on a program searching for 19999999 by counting, where `i`
-  read `860354` and `(set i 20000000)` then `:c` finished the search at once. The loop depth is passed
-  too, so `(break)` typed in such a session still leaves the loop: verified over the same pty, where
-  `(break 42)` produced `answer=42`. `:bt` resolves against the right source, so the frame is there.
-  The prompt names the line the program was on, which is the enclosing `loop` or the innermost
-  expression under evaluation, whichever check saw the signal first — on that program it reads line 4,
-  7 or 9 from run to run, and each is a line the program was really on. That is the right answer: a
-  signal carries no position, so there is nothing more precise to report.
-- `Error::Interrupted` is now only the no-controlling-terminal case, so the `Error::Interrupted` arm in
-  the session loop became dead and was removed. The evaluator can no longer produce that error; the
-  generic per-line diagnostic path handles it correctly if a fallback ever reaches a session. The
-  fallback exists because a session needs a terminal: with none, Ctrl-C still ends the run, with
-  `Interrupted` and no mention of the missing terminal, since someone who pressed Ctrl-C to stop a
-  program did not ask about the terminal. Verified by running a long program under
-  `start_new_session=True`, which detaches the controlling terminal: exit 1, `Interrupted`, a caret
-  and a call trace.
-- A native function cannot open a session itself, because `NativeFunction` closures are
-  `Fn(Vec<Value>)` and are not given the environment; threading one through would touch every native
-  in every module. Instead `check_interrupted` records the interrupt in a thread-local and the
-  evaluator opens the session at its next check, a node or a loop iteration away. This is the fix for
-  the `io.read` data loss, which is the more common interactive case: previously a Ctrl-C at an
-  `io.read` prompt ended the run *after* the read returned, so the line the user typed after the
-  cancel was read and then thrown away. Verified both ways over a pty on a prompt-and-read program:
-  before, `first> ^C`, `hello`, then `prog.lisp:2:34: Interrupted`; after, `hello` is used by the
-  program and a session opens at the next line. The cost is that the session opens a node late rather
-  than exactly at the read, and not at all if the program ends first, which is stated in spec_en.md
-  §20.10 and Appendix C. The flag is thread-local because a native and the evaluator driving it are
-  always the same thread, and that is also what makes the wiring testable without racing the
-  process-wide `INTERRUPTED`.
-- `source_for_span` was added because a span is not always in the context on top of the source stack:
-  a program running inside a session line has the line on top, and an offset into the program can be
-  past the end of it, so the prompt used to fall back to a bare `repl> `. The stack is now searched
-  from the top for the first context long enough to hold the span. The `(repl)` form keeps using the
-  top, because its span does live there.
-- Five tests. `a_ctrl_c_opens_a_session_and_the_program_continues_after_it` drives the evaluator
-  wiring end to end, through `eval` and `take_interrupt`, and asserts the notice lands before the
-  first prompt and that the program still reaches its end value.
-  `a_ctrl_c_session_can_quit_the_whole_run` locks `:q`. `a_ctrl_c_session_reads_and_writes_the_scope_it_was_opened_with`
-  is the property that makes the loop case work, and drives `interrupt_into_repl` directly, because a
-  pending interrupt set before a program starts is consumed by its first node, long before any loop
-  exists — so the loop scope itself was verified over a pty instead.
-  `a_ctrl_c_before_a_session_starts_leaves_no_interrupt_behind` locks the flag consumption that stops
-  `:c` from looping on itself. `a_native_that_notices_a_ctrl_c_hands_it_to_the_evaluator` and
-  `a_source_span_resolves_against_the_source_that_contains_it` cover the handoff and the source
-  lookup. spec_en.md §18, §20.8, §20.9 and §20.10 rewritten, Appendix C item 10 added.
-
-- Resolved: `\u{HEX}` escape in a `"..."` string, naming one Unicode scalar value. `HEX` is one or
-  more hex digits in either case with no fixed width and no required leading zeros, so `\u{41}`,
-  `\u{0041}` and `\u{000041}` are the same character. A value above the last code point 10FFFF is
-  refused, and so is the surrogate range D800 to DFFF in either case, because no character has one of
-  those values; a value too long for 32 bits lands in the first message too, since the parse cannot
-  fail any other way once the digits are known to be hex. A malformed form — no brace, no closing
-  brace, a non-hex digit, a space, a minus sign — is one `ParseError` reading `a unicode escape must
-  be written \u{HEX}`, and the empty pair `\u{}` gets `a unicode escape needs at least one digit`.
-  The braces are required: there is deliberately no brace-less form, so the JSON `\u0001` that `%j`
-  writes stays unreadable, and `(eval ($ "%j" s))` on a string with a control character is a
-  `ParseError` rather than a wrong value. That direction was put to the user, who chose the strict
-  braced form over also accepting JSON's. Two old limits fall out of this. The reader can now build a
-  control character from source, which it could not do at all before, so the G2 regression test no
-  longer needs a file fixture to obtain one (it keeps the file, since io.read is how one really
-  arrives). And because a raw control byte is legal in source, `%q`, `%x` and a nested `%s` all read
-  back a string holding one, so `%j` is the only specifier that does not. New tests:
-  `unicode_escapes_name_one_code_point`, `unicode_escapes_reject_non_scalar_values`,
-  `control_characters_round_trip_through_every_specifier_but_json`. spec_en.md gains §1.6, with
-  §1.2, §15.2 and §21.3 updated. (Drift.md D1)
-
-- Resolved: `lisp_string` now emits `\u{HEX}` for every control character, so the specifiers that
-  write a string as source produce valid, copyable Lisp rather than something that merely re-reads.
-  Any control character — C0 (`0x00`-`0x1F`), DEL (`0x7F`) and C1 (`0x80`-`0x9F`), which is exactly
-  Unicode `Cc` and so exactly Rust's `char::is_control` — is written as `\u{HEX}` with uppercase hex
-  digits and no leading zeros: `0x01` is `\u{1}`, `0x0B` is `\u{B}`, `0x7F` is `\u{7F}`, `0x9B` is
-  `\u{9B}`. Line feed, carriage return and tab keep their short escapes `\n`, `\r`, `\t`; they are
-  control characters too, but they already had an escape, and their own form is the readable one.
-  Nothing else is escaped, so `é`, an emoji, U+00A0, U+00AD and U+10FFFF all stay literal and a
-  string of ordinary text comes out looking like itself. The direction was put to the user, who
-  confirmed that exact table. This applies to `%q`, to a string nested in `%x`, and to a string
-  nested in `%s`, because all three go through this one function. `%j` is deliberately untouched and
-  stays JSON with its brace-less `\u0001`. Round-trip tests assert `(eq (eval ($ "%q" v)) v)` and the
-  same for `%x` and a nested `%s` for all 65 control code points, not a sample, and a pinned-form
-  test fixes the emitted text so a future change cannot slip back to a raw byte. New tests:
-  `every_control_character_round_trips_through_q_x_and_nested_s`,
-  `control_characters_are_rendered_as_unicode_escapes`, `printable_characters_are_rendered_literally`.
-  486 tests green debug+release, fmt/clippy clean. spec_en.md §15.3 gains the full table and the
-  rationale, with §1.6, §15.2 and the §15.2 summary row updated. Two things deliberately left:
-  `%v` still uses Rust's own debug escaping, so its `\u{1}` is lowercase hex where the reader's own
-  forms are uppercase — the reader takes both, so this is cosmetic; and `%j` still does not read
-  back, which is correct for JSON.
-
-- Resolved: `use` AST special-case removed — modules are defined and registered in two
-  separate steps, and `use` evaluates its argument normally (no AST peek). `(let name {…})`
-  defines a module (plain binding); `(use "name")` evaluates its argument to a name string,
-  then either loads a native (`io`/`str`/`http`, binding like `let` — duplicate in the same
-  scope stays DuplicateBindingError) or looks up the existing binding, validates the module
-  syntax and registers it in the current scope (at most once per scope — ModuleError
-  "module `X` is already registered"; shadowing in a child scope registers afresh, like
-  `let`). Unknown names → NameError "module `X` is not defined"; the old
-  `(use (let m {…}))` shape is gone (the arg evaluates to Null → TypeError "expected
-  string"). This also kills the pre-existing ordering leak by construction: validation now
-  always happens before anything is committed, so a failed registration binds/registers
-  nothing (probes: `(use (let m 5))` left `m=5` bound; `(use (let m {f: 1}))` left `m`
-  bound to the broken struct). Env gained a per-scope `modules` list; new Error::Module
-  variant; src/tests/modules.rs converted to the two-step form + 4 new registration tests;
-  core.rs reserved-name check updated; spec.txt §2.1 and README "### Module descriptors"
-  updated. `examples/quick.lisp` still uses the old one-step shape (user WIP, untouched).
-  (was 10)
-
-- Resolved: spec.type per-argument alternatives + vocabulary validation. Each of the `arity` (fixed integer) entries in `type` is a single type name (exact match), a
-  non-empty array of type names (per-argument alternatives: the argument independently matches
-  any member; allowed combinations are the cross product — never whole-signature overloads), or
-  the `"any"` wildcard — which is the top type and may appear ONLY as a standalone entry:
-  `['int']` → exactly int, `[['int' 'float']]` → int|float, `['any']` → all value types,
-  `[['int' 'any']]` → registration error ("spec.type `any` cannot be combined with alternative
-  types"), never silently normalized. All names validated at registration against the vocabulary
-  null|bool|int|float|string|array|struct|function|ref|any (unknown names and empty sets fail
-  fast). Mismatch error widens to "expects one of X, Y, got Z" for sets; singleton messages
-  unchanged. `return` stays declaration-only. Spec stays live: `set` into `spec.type` affects
-  every subsequent call. 470 tests green (debug+release), fmt/clippy clean; README + spec.txt §2
-  document the syntax and the alternatives-vs-overloads distinction. (was the polymorphic-argument hole)
-
-- Resolved: scientific notation in float literals, at the user's request. The rule is that an
-  exponent makes a literal a float even when its value is whole, so `1e3` is 1000.0 and `1e0` is a
-  float where a bare `1` is an integer. This is the arithmetic the language already did one case
-  over: `(pow 2 1.5)` had always returned a float, so an integer base never implied an integer
-  result. The exponent is `e` or `E`, an optional `+` or `-`, and at least one digit; the dot stays
-  optional, so `1e2` and `1.5e2` are both literals. The change is two hunks in `lex_tokens` and
-  `number`, following the split the lexer already keeps between a token's extent and its meaning:
-  the fast path claims the exponent so `1e3` is one token instead of the number `1` and the name
-  `e3`, and `number` turns an exponent-bearing token into a float. A malformed exponent is
-  `ParseError: invalid number` naming the token, with the caret at the token start as
-  `integer out of range` puts it, so `1e`, `1e+` and `1e-` are refused rather than quietly read as
-  names. A literal ends at its last digit, so `1e3abc` is the float 1000.0 and then the name `abc`,
-  which is the boundary `1.5x` already had. The exponent is only looked for in a token that starts
-  with a digit, and that gate is load-bearing rather than tidiness: `f64::from_str` accepts `inf`,
-  `nan` and `infinity` case-insensitively, so without it those names would have become floats. A
-  radix literal is unaffected for a related reason, since the prefix letter always follows the first
-  digit run, so `0x1e3` is still the integer 483 and `0xE` the integer 14. This reverses three
-  documented claims: the float row of the type table, "`1e3` is not a float, it is the name `1e3`",
-  and "Because there is no exponent notation". It also costs every name shaped like a digit run
-  then `e` with no digits after it, so `1e`, `1ea` and `1element` are now errors, while `1a`,
-  `1_000`, `0x` and `0X10` are untouched. Printing is deliberately unchanged, a float writes in
-  plain decimal and never as an exponent, so `1e3` writes as `1000` and `1e300` as a 1 and 300
-  zeros. Eight tests, of which the six that lock the behaviour were each confirmed to fail against
-  the pre-change code. spec_en.md §1.1 rewritten, §2.1 extended, the type table and §15.4 updated.
-
-- Resolved: `-NaN` is a float literal, at the user's request. It was a name and gave a `NameError`
-  while `-Inf` has always been a literal, and the asymmetry was syntactic only: a NaN does carry a
-  sign, so `-NaN` is `NaN` with the sign bit set. The rule is now uniform, a leading `-` negates,
-  which on an infinity picks the other sign and on a NaN sets the sign bit. The change is one arm in
-  the parser's literal table, and no lexer change, since `-NaN` already lexed as a single symbol.
-  `-f64::NAN` over `f64::NAN` costs nothing, because no output can see it: `float_render` and
-  `float_source` both collapse any NaN to `NaN` through `is_nan()`, so `%s`, `%f`, `%x`, `%t` and
-  `%v` are byte-identical across `NaN`, `+NaN` and `-NaN`, each checked. The cost is the one place
-  where a literal and its own output disagree in sign, since `-NaN` writes as `NaN` and not as
-  `-NaN`, which spec_en.md §1.1 now says; `-Inf` by contrast keeps its sign in `%s` and `%x`.
-  Comparison is unchanged and IEEE correct: `(eq -NaN -NaN)` is false, as it is for `NaN`, while
-  `(eq -Inf -Inf)` is true. `-NaN` is a reserved literal now, exactly like `-Inf`, so `(let -NaN 1)`
-  is a `TypeError`. `-nan`, `-inf`, `nan`, `inf` and `-infinity` stay names, which is worth a test
-  of its own since `f64::from_str("-NaN")` does succeed. Two new tests, plus the existing non-finite
-  test extended, all three confirmed to fail without the arm; the sign bit itself is asserted on the
-  `f64` with `is_sign_negative`, since no output path can show it. Fixing this also corrected a
-  claim in §15.4 that was already wrong, that `%x` output "re-parses as a value equal to the
-  original", which is false for any NaN since `eq` is false even against itself. 513 tests green
-  debug+release, fmt/clippy clean. spec_en.md §1.1, §2.2 and §15.4.
-
-- Target TDC 16.1 CPU (Or explore LLVM)
+- Drift.md F1-F4 are fixed: the REPL prompt assertions, the interrupt test that drove the wrong
+  branch, the `/dev/tty` routing extracted as `ReplSink`, and the doubled-prefix test.
+- Drift.md F5-F10 and F12 are now covered, by fourteen tests added in one pass. F12 turned out
+  to be stale rather than open: `format_errors_point_at_the_dollar_call` already asserts a
+  rendered caret for a `$` error. The rest were genuinely untested, and the audit understated
+  two of them. `expect` had *no* test at all, not just no arity test — `ExpectationError` had
+  zero occurrences in the suite — so its success path, its two failure-message shapes from
+  spec_en.md:1149-1150, its arity error, its string-only third argument and its function
+  identity rule are all now asserted. And the width gap was wider than the width: while
+  verifying it, three more documented claims turned out to have no test, namely that only `b`
+  and `h` accept a width, that `%o` of a negative integer is its full 64-bit two's
+  complement, and that reading a reserved or builtin name as a value is a `NameError`
+  (spec_en.md:418-420). Each new test asserts the exact documented text rather than the
+  current output, so the spec is what is pinned.
+- Drift.md F11 is covered and was no longer accurate: `bit-shl` overflow is asserted by name in
+  `integer_builtins_turn_operator_overflows_into_lisp_errors` (`src/tests/arithmetic.rs:25`),
+  and `(bit-shl 4611686018427387904 2)` is verified as `IntegerOverflow`.
+- All of Drift.md's A, B, C, D and E classes are moot. `spec.txt` no longer exists, so an A or B
+  finding has no document to contradict; `spec_en.md` is the source of truth, and the one A-class
+  case with a live code consequence, A2, was fixed directly when `-NaN` became a literal.
+  `README.md` is now a 12-line stub whose only content is a pointer to `spec_en.md`, so the seven
+  C findings and four D findings no longer describe any text that exists anywhere in the repo.
+- Every `Resolved:` entry that was in this file. 499 lines of resolved history, most of it
+  predating the spec rewrite, was the noise that prompted this cleanup. The reasoning lives in
+  the commit log; what remains here is what is still true and still undone.

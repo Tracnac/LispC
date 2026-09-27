@@ -4,6 +4,18 @@ Audit of incoherence between the Small Lisp implementation, its French specifica
 (`spec.txt`), the English summary (`README.md`), and the engineering scratchpad (`todo`).
 No source file was modified in the course of this audit.
 
+> **Status: historical record, not a work queue.** This audit was taken against `2bf172a` with
+> 477 tests, and it is kept for what it found rather than for what is left to do. The findings
+> are now in three states. The still-open ones are consolidated in `InProgress/todo`, which cites
+> the `(Drift.md Xn)` tag back into here; nothing in this file is marked, because the per-finding
+> state is in one place rather than scattered across 810 lines. Most of the A, B, C, D and E
+> classes are moot: `spec.txt` no longer exists and `spec_en.md` is the source of truth, and
+> `README.md` is a 12-line stub that only points at `spec_en.md`, so the C and D findings no
+> longer describe any text in the repo. The class counts in the Summary below are the counts *as
+> taken at `2bf172a`*, not the current state. One finding the audit listed is now covered by a
+> test and was dropped: F11. Line numbers and test counts below are those of the audit baseline
+> and are not maintained.
+
 ## Baseline
 
 - `cargo build --release` — up to date.

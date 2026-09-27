@@ -1,4 +1,5 @@
-use super::check;
+use super::{check, run};
+use crate::Error;
 
 #[test]
 fn integer_order_comparisons_are_exact_beyond_f64_precision() {
@@ -564,4 +565,59 @@ fn le_nan_is_not_less_or_equal_to_float() {
 #[test]
 fn ge_nan_is_not_greater_or_equal_to_float() {
     check(r#"(ge NaN 1.0)"#, r#"f"#);
+}
+
+#[test]
+fn functions_compare_by_identity_and_not_by_code() {
+    check(r#"((let a (fn (x) x)) (eq a a))"#, r#"t"#);
+    check(r#"((let a (fn (x) x)) (ne a a))"#, r#"f"#);
+    // Two closures built from identical source are distinct values, so this
+    // is the case that would break under structural comparison.
+    check(
+        r#"((let a (fn (x) x)) (let b (fn (x) x)) (eq a b))"#,
+        r#"f"#,
+    );
+    check(
+        r#"((let a (fn (x) x)) (let b (fn (x) x)) (ne a b))"#,
+        r#"t"#,
+    );
+}
+
+#[test]
+fn different_non_numeric_types_are_unequal_and_never_an_error() {
+    for (left, right) in [
+        (r#""a""#, "1"),
+        ("1", r#""a""#),
+        ("[1]", "1"),
+        ("1", "[1]"),
+        ("t", "1"),
+        ("1", "t"),
+        (r#""a""#, "t"),
+        ("[1]", "{a: 1}"),
+    ] {
+        check(&format!("(eq {left} {right})"), r#"f"#);
+        check(&format!("(ne {left} {right})"), r#"t"#);
+    }
+    // Cross-type numeric comparison stays allowed, so the unequal rule above
+    // must not be read as "any pair of different types is an error".
+    check(r#"(eq 1 1.0)"#, r#"t"#);
+    check(r#"(ne 1 1.0)"#, r#"f"#);
+}
+
+#[test]
+fn ordered_comparisons_reject_non_numeric_operands() {
+    for source in [
+        r#"(lt "a" "b")"#,
+        r#"(gt "a" "b")"#,
+        r#"(le "a" "b")"#,
+        r#"(ge "a" "b")"#,
+        r#"(lt 1 "a")"#,
+        r#"(lt t 1)"#,
+        r#"(lt [1] 1)"#,
+    ] {
+        assert!(
+            matches!(run(source), Err(Error::Type(message)) if message == "expected number"),
+            "expected a TypeError for {source}"
+        );
+    }
 }

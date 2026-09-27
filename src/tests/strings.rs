@@ -1389,3 +1389,103 @@ fn format_tilde_regex_type_and_arity_errors() {
         Err(Error::Regex(message)) if message.contains("invalid regex")
     ));
 }
+
+#[test]
+fn a_rejected_fixed_width_names_the_specifier_and_the_accepted_widths() {
+    for (source, specifier) in [
+        (r#"($ "%7b" 5)"#, "%7b"),
+        (r#"($ "%9h" 5)"#, "%9h"),
+        (r#"($ "%0b" 5)"#, "%0b"),
+        (r#"($ "%1b" 5)"#, "%1b"),
+        (r#"($ "%5b" 5)"#, "%5b"),
+        (r#"($ "%128b" 5)"#, "%128b"),
+        (r#"($ "%0h" 5)"#, "%0h"),
+        (r#"($ "%5h" 5)"#, "%5h"),
+        (r#"($ "%65h" 5)"#, "%65h"),
+    ] {
+        let error = match run(source) {
+            Err(error) => error,
+            Ok(_) => panic!("{source} was expected to fail"),
+        };
+        assert_eq!(
+            error.to_string(),
+            format!("FormatError: FormatTypeError: {specifier} supports widths 8, 16, 32, or 64")
+        );
+    }
+    // The four accepted widths still work, so the rejection is about the width
+    // and not about the specifier pair.
+    check(r#"($ "%8b" 5)"#, r#""00000101""#);
+    check(r#"($ "%16b" 5)"#, r#""0000000000000101""#);
+    check(r#"($ "%32b" 5)"#, r#""00000000000000000000000000000101""#);
+    check(
+        r#"($ "%64b" 5)"#,
+        r#""0000000000000000000000000000000000000000000000000000000000000101""#,
+    );
+    check(r#"($ "%8h" 5)"#, r#""05""#);
+    check(r#"($ "%64h" 5)"#, r#""0000000000000005""#);
+}
+
+#[test]
+fn a_width_too_large_to_parse_is_reported_without_a_sub_message() {
+    for source in [
+        r#"($ "%99999999999999999999b" 5)"#,
+        r#"($ "%99999999999999999999h" 5)"#,
+    ] {
+        let error = match run(source) {
+            Err(error) => error,
+            Ok(_) => panic!("{source} was expected to fail"),
+        };
+        // A width that cannot be parsed is reported as a bare message: it
+        // names neither the specifier nor the accepted widths, which is the
+        // one place the format taxonomy splits. See the todo item.
+        assert_eq!(error.to_string(), "FormatError: invalid binary width");
+    }
+}
+
+#[test]
+fn only_binary_and_hexadecimal_forms_accept_a_fixed_width() {
+    for source in [
+        r#"($ "%8d" 5)"#,
+        r#"($ "%8s" 5)"#,
+        r#"($ "%8o" 5)"#,
+        r#"($ "%8x" 5)"#,
+        r#"($ "%8f" 5)"#,
+        r#"($ "%8j" 5)"#,
+        r#"($ "%8t" 5)"#,
+        r#"($ "%8v" 5)"#,
+        r#"($ "%8q" 5)"#,
+    ] {
+        let error = match run(source) {
+            Err(error) => error,
+            Ok(_) => panic!("{source} was expected to fail"),
+        };
+        // A width on any other specifier is a capture selector, not a width.
+        assert_eq!(
+            error.to_string(),
+            "FormatError: capture selector without preceding %~"
+        );
+    }
+}
+
+#[test]
+fn a_negative_value_is_two_complement_truncated_to_the_requested_width() {
+    check(r#"($ "%8b" -1)"#, r#""11111111""#);
+    check(r#"($ "%16b" -1)"#, r#""1111111111111111""#);
+    check(r#"($ "%32b" -1)"#, r#""11111111111111111111111111111111""#);
+    check(
+        r#"($ "%64b" -1)"#,
+        r#""1111111111111111111111111111111111111111111111111111111111111111""#,
+    );
+    // Truncation, not saturation: 256 is zero in 8 bits, and -256 keeps its
+    // sign bit together with every bit above the requested width.
+    check(r#"($ "%8b" 256)"#, r#""00000000""#);
+    check(r#"($ "%8b" -256)"#, r#""00000000""#);
+    check(r#"($ "%16b" -256)"#, r#""1111111100000000""#);
+}
+
+#[test]
+fn octal_of_a_negative_integer_is_its_full_64_bit_two_complement() {
+    check(r#"($ "%o" -1)"#, r#""1777777777777777777777""#);
+    check(r#"($ "%o" 0)"#, r#""0""#);
+    check(r#"($ "%o" 8)"#, r#""10""#);
+}
