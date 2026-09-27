@@ -228,7 +228,7 @@ fn read(args: Vec<Value>) -> Result<Value, Error> {
 /// `read_line` keeps the underlying buffer filled, so the next read on the same
 /// descriptor continues without losing prefetched data.
 fn read_line<R: BufRead>(reader: &mut R) -> Result<Option<String>, Error> {
-    check_interrupted()?;
+    check_interrupted();
     let mut line = String::new();
     let bytes = reader
         .read_line(&mut line)
@@ -236,7 +236,7 @@ fn read_line<R: BufRead>(reader: &mut R) -> Result<Option<String>, Error> {
             io::ErrorKind::InvalidData => Error::Io("input is not valid UTF-8".into()),
             _ => Error::Io(error.to_string()),
         })?;
-    check_interrupted()?;
+    check_interrupted();
     if bytes == 0 {
         return Ok(None);
     }

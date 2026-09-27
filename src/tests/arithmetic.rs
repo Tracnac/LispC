@@ -160,6 +160,65 @@ fn pow_raises_base_to_exponent() {
 }
 
 #[test]
+fn pow_uses_integer_arithmetic_only_for_a_non_negative_integer_exponent() {
+    // The rule is about the arithmetic, not just the value, so the type is
+    // asserted too: an integer base does not by itself mean an integer result.
+    for (source, expected, kind) in [
+        ("(pow 2 3)", "8", "int"),
+        ("(pow 2 0)", "1", "int"),
+        ("(pow 0 0)", "1", "int"),
+        ("(pow -2 3)", "-8", "int"),
+        ("(pow 2 -1)", "0.5", "float"),
+        ("(pow 2 -2)", "0.25", "float"),
+        ("(pow 2 -3)", "0.125", "float"),
+        ("(pow -2 -3)", "-0.125", "float"),
+        ("(pow 1 -1)", "1", "float"),
+        ("(pow 2 1.5)", "2.8284271247461903", "float"),
+        ("(pow 2.0 0)", "1", "float"),
+        ("(pow 2.0 -1)", "0.5", "float"),
+        ("(pow 2.0 -2)", "0.25", "float"),
+    ] {
+        let value = run(source).unwrap_or_else(|_| panic!("{source} failed"));
+        assert_eq!(value_type(&value), kind, "{source} must be a {kind}");
+        check(source, expected);
+    }
+}
+
+#[test]
+fn pow_still_reports_a_genuine_integer_overflow() {
+    // A negative exponent is not an overflow, but one that does not fit a
+    // signed 64 bit integer still is, and must not be diverted to the float path
+    // by the same test that its neighbour is.
+    for source in ["(pow 2 63)", "(pow 2 64)", "(pow 2 1000)", "(pow -2 64)"] {
+        assert!(
+            matches!(
+                run(source),
+                Err(Error::Math(message)) if message == "IntegerOverflow"
+            ),
+            "{source} must report IntegerOverflow"
+        );
+    }
+    check(r#"(pow 2 62)"#, r#"4611686018427387904"#);
+    // The last two powers that fit: 2^63 is one past the maximum, and (-2)^63 is
+    // exactly the minimum, so only the first of the pair overflows.
+    check(r#"(pow -2 63)"#, r#"-9223372036854775808"#);
+    // The float path does not overflow, it saturates.
+    assert!(matches!(run("(pow 2.0 1000)"), Ok(Value::Float(_))));
+}
+
+#[test]
+fn pow_by_a_negative_exponent_of_zero_is_infinite() {
+    // Zero to a negative power is not a value, so it follows the float path and
+    // saturates, exactly as (pow 0.0 -1) always did.
+    for source in ["(pow 0 -1)", "(pow 0 -2)", "(pow 0.0 -1)"] {
+        match run(source) {
+            Ok(Value::Float(value)) => assert!(value.is_infinite(), "{source} must be infinite"),
+            _ => panic!("{source} must be an infinite float"),
+        }
+    }
+}
+
+#[test]
 fn bit_and_with_no_operands_returns_minus_one() {
     check(r#"(bit-and)"#, r#"-1"#);
 }

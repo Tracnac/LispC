@@ -200,8 +200,26 @@ thread_local! {
     static REPL_OUTPUT: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
     // Test hook: a per-thread signal that the REPL session loop treats as
     // Ctrl-C, so tests can simulate an interrupt deterministically without
-    // racing the process-wide INTERRUPTED flag.
+    // racing the process-wide INTERRUPTED flag. Stands for an interrupt that
+    // arrived before the prompt was drawn, so there is no line to cancel.
     static REPL_INTERRUPT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    // Test hook: the same signal, but at the one position REPL_INTERRUPT cannot
+    // reach: a Ctrl-C that arrived while the console was blocked reading. std
+    // retries an interrupted read, so a real Ctrl-C is only visible once a whole
+    // line has been typed, and the line in hand is then the one typed after the
+    // cancel. Kept separate so a test can drive each position on its own.
+    static REPL_INTERRUPT_AFTER_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// A Ctrl-C noticed inside a native function, waiting for the evaluator to open
+// a session. A native is not given the environment, so it cannot open one
+// itself, and it must not end the run either: it is usually blocked on a read,
+// and ending the run there would throw away the line the user typed after the
+// cancel. Per-thread, because a native function and the evaluator driving it
+// are always the same thread. A test sets this to stand for an interrupt the
+// evaluator has not seen yet.
+thread_local! {
+    static INTERRUPT_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 
@@ -232,11 +250,69 @@ fn install_sigint_handler() -> Result<(), Error> {
     .map_err(|error| Error::Io(format!("failed to install Ctrl-C handler: {error}")))
 }
 
-pub(crate) fn check_interrupted() -> Result<(), Error> {
-    if INTERRUPTED.load(Ordering::Relaxed) {
-        Err(Error::Interrupted)
-    } else {
-        Ok(())
+/// A Ctrl-C opens a session at the point it interrupted, rather than ending the
+/// run. `:c` resumes the interrupted computation, `:q` ends the run.
+///
+/// With no controlling terminal there is no session to open, so the run still
+/// ends, with `Interrupted`. The failure to open the terminal is not reported:
+/// someone who pressed Ctrl-C to stop a program does not want to be told the
+/// terminal is missing.
+fn interrupt_into_repl(env: &EnvRef, loop_depth: usize, span: Span) -> Result<(), Flow> {
+    // Consume the flag before the session opens, so resuming with `:c` does not
+    // immediately open another session.
+    INTERRUPTED.store(false, Ordering::Relaxed);
+    INTERRUPT_PENDING.set(false);
+    let console = match open_repl_console() {
+        Ok(console) => console,
+        Err(_) => return Err(Flow::Error(Error::Interrupted)),
+    };
+    // The source the session's prompt, :l, :i and :bt resolve spans against.
+    let source = source_for_span(span);
+    // An empty label, so the prompt is the bare execution point. The notice
+    // comes before the first prompt, so a session that was not asked for says
+    // why it is there.
+    run_repl_on(
+        env,
+        loop_depth,
+        "",
+        span,
+        source,
+        console,
+        Some(INTERRUPT_NOTICE),
+    )
+    .map(|_| ())
+}
+
+/// The innermost source context a span belongs to.
+///
+/// A span is not always in the context on top of the stack: a program running
+/// inside a session line has the line on top, and an offset into the program
+/// can be past the end of it. So the stack is searched from the top for the
+/// first context long enough to hold the span, and the top is used only when
+/// none is.
+fn source_for_span(span: Span) -> Option<SourceCtx> {
+    EVAL_SOURCES.with(|sources| {
+        let sources = sources.borrow();
+        sources
+            .iter()
+            .rev()
+            .find(|ctx| ctx.source.len() >= span.start)
+            .or_else(|| sources.last())
+            .cloned()
+    })
+}
+
+/// Whether a Ctrl-C is waiting to open a session, and consumes it if so.
+fn take_interrupt() -> bool {
+    INTERRUPTED.load(Ordering::Relaxed) || INTERRUPT_PENDING.replace(false)
+}
+
+/// Note a Ctrl-C noticed inside a native function, for the evaluator to act on
+/// at its next check. See `INTERRUPT_PENDING`. Nothing is lost if the program
+/// ends before the evaluator reaches its next check.
+pub(crate) fn check_interrupted() {
+    if INTERRUPTED.swap(false, Ordering::Relaxed) {
+        INTERRUPT_PENDING.set(true);
     }
 }
 
@@ -321,13 +397,53 @@ fn unicode_escape(cs: &[char], i: &mut usize) -> Result<char, Error> {
     char::from_u32(value).ok_or_else(|| Error::Parse(format!("\\u{{{digits}}} is not a character")))
 }
 
+/// Tokenise `src`, recording where a lexer error happened.
+///
+/// Token spans are byte offsets, because that is what every diagnostic slices
+/// with, while the token loop below counts characters. The translation table is
+/// therefore built up front rather than after the loop, so an error is
+/// positioned as well as a successful tokenisation. A fresh tokenisation clears
+/// `PARSE_ERROR_SPAN` first and then stamps the start of the token it was
+/// reading, so a lexer error can never be reported against a span left behind by
+/// an earlier parse.
 fn lex(src: &str) -> Result<Vec<Tok>, Error> {
+    let byte_offsets: Vec<usize> = src
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .chain(std::iter::once(src.len()))
+        .collect();
+    PARSE_ERROR_SPAN.with(|span| *span.borrow_mut() = None);
+    // The character index the token loop is currently reading, reported as a
+    // byte offset if the tokenisation fails.
+    let mut at = 0;
+    match lex_tokens(src, &mut at) {
+        Ok(mut tokens) => {
+            for token in &mut tokens {
+                token.span.start = byte_offsets[token.span.start];
+                token.span.end = byte_offsets[token.span.end];
+            }
+            Ok(tokens)
+        }
+        Err(error) => {
+            let at = byte_offsets.get(at).copied().unwrap_or(src.len());
+            PARSE_ERROR_SPAN.with(|span| *span.borrow_mut() = Some(Span { start: at, end: at }));
+            Err(error)
+        }
+    }
+}
+
+/// The token loop behind `lex`. The spans it builds are character indices,
+/// because it counts characters in a `Vec<char>`; `lex` translates them into
+/// the byte offsets the diagnostics use. `at` tracks the character index of the
+/// token being read, so `lex` can position a failure.
+fn lex_tokens(src: &str, at: &mut usize) -> Result<Vec<Tok>, Error> {
     let mut out = Vec::new();
     let cs: Vec<char> = src.chars().collect();
     let mut i = 0;
     while i < cs.len() {
         let c = cs[i];
         let token_start = i;
+        *at = token_start;
         if c.is_whitespace() || c == ',' {
             i += 1;
             continue;
@@ -477,15 +593,6 @@ fn lex(src: &str) -> Result<Vec<Tok>, Error> {
                 },
             })
         }
-    }
-    let byte_offsets: Vec<usize> = src
-        .char_indices()
-        .map(|(offset, _)| offset)
-        .chain(std::iter::once(src.len()))
-        .collect();
-    for token in &mut out {
-        token.span.start = byte_offsets[token.span.start];
-        token.span.end = byte_offsets[token.span.end];
     }
     Ok(out)
 }
@@ -1147,7 +1254,7 @@ fn location(e: &Expr, env: &EnvRef) -> Result<(Cell, Vec<PathStep>), Error> {
             Ok((root, steps))
         }
         ExprKind::Index(base, IndexSpec::Selector(selector)) => {
-            let index = match eval(selector, env, 0, 0).map_err(flow_err)? {
+            let index = match eval(selector, env, 0).map_err(flow_err)? {
                 Value::Int(index) => index,
                 Value::Array(_) => {
                     return Err(Error::Type(
@@ -1169,10 +1276,9 @@ fn location(e: &Expr, env: &EnvRef) -> Result<(Cell, Vec<PathStep>), Error> {
     }
 }
 
-fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResult {
-    if let Err(error) = check_interrupted() {
-        LAST_ERROR_SPAN.with(|span| span.set(Some(e.span)));
-        return Err(error.into());
+fn eval(e: &Expr, env: &EnvRef, loop_depth: usize) -> EResult {
+    if take_interrupt() {
+        interrupt_into_repl(env, loop_depth, e.span)?;
     }
     LAST_ERROR_SPAN.with(|span| span.set(Some(e.span)));
     match &e.kind {
@@ -1201,10 +1307,10 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
             if matches!(spec, IndexSpec::Selector(_)) && is_location(target) {
                 let (root, path) = location(target, env).map_err(Flow::Error)?;
                 let value = deref(&root, &path).map_err(Flow::Error)?;
-                apply_index(value, spec, env, loop_depth, match_depth)
+                apply_index(value, spec, env, loop_depth)
             } else {
-                let value = eval(target, env, loop_depth, match_depth)?;
-                apply_index(value, spec, env, loop_depth, match_depth)
+                let value = eval(target, env, loop_depth)?;
+                apply_index(value, spec, env, loop_depth)
             }
         }
         ExprKind::Ref(x) => location(x, env)
@@ -1213,7 +1319,7 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
         ExprKind::Array(xs) => {
             let mut v = Vec::with_capacity(xs.len());
             for x in xs {
-                v.push(eval(x, env, loop_depth, match_depth)?);
+                v.push(eval(x, env, loop_depth)?);
             }
             Ok(Value::Array(Rc::new(v)))
         }
@@ -1225,10 +1331,7 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
                     LAST_ERROR_SPAN.with(|span| span.set(Some(field.span)));
                     return Err(Error::DuplicateKey(field.key.clone()).into());
                 }
-                v.push((
-                    field.key.clone(),
-                    eval(&field.value, env, loop_depth, match_depth)?,
-                ));
+                v.push((field.key.clone(), eval(&field.value, env, loop_depth)?));
             }
             Ok(Value::Struct(Rc::new(v)))
         }
@@ -1236,22 +1339,16 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResul
             let child = new_env(Some(env.clone()));
             let mut r = Value::Null;
             for x in xs {
-                r = eval(x, &child, loop_depth, match_depth)?
+                r = eval(x, &child, loop_depth)?
             }
             Ok(r)
         }
-        ExprKind::Call(head, args) => call(head, args, env, loop_depth, match_depth, e.span),
+        ExprKind::Call(head, args) => call(head, args, env, loop_depth, e.span),
     }
 }
-fn apply_index(
-    value: Value,
-    spec: &IndexSpec,
-    env: &EnvRef,
-    loop_depth: usize,
-    match_depth: usize,
-) -> EResult {
+fn apply_index(value: Value, spec: &IndexSpec, env: &EnvRef, loop_depth: usize) -> EResult {
     let selector = match spec {
-        IndexSpec::Selector(expr) => eval(expr, env, loop_depth, match_depth)?,
+        IndexSpec::Selector(expr) => eval(expr, env, loop_depth)?,
         IndexSpec::Range(_, _) => Value::Null,
     };
     match value {
@@ -1270,15 +1367,8 @@ fn apply_index(
                 }
             }
             IndexSpec::Range(start, end) => {
-                let Some((start, end)) = range_positions(
-                    start,
-                    end,
-                    env,
-                    loop_depth,
-                    match_depth,
-                    values.len(),
-                    "array",
-                )?
+                let Some((start, end)) =
+                    range_positions(start, end, env, loop_depth, values.len(), "array")?
                 else {
                     return Ok(Value::Array(Rc::new(Vec::new())));
                 };
@@ -1306,15 +1396,8 @@ fn apply_index(
                     }
                 }
                 IndexSpec::Range(start, end) => {
-                    let Some((start, end)) = range_positions(
-                        start,
-                        end,
-                        env,
-                        loop_depth,
-                        match_depth,
-                        graphemes.len(),
-                        "string",
-                    )?
+                    let Some((start, end)) =
+                        range_positions(start, end, env, loop_depth, graphemes.len(), "string")?
                     else {
                         return Ok(Value::Str(String::new()));
                     };
@@ -1359,7 +1442,6 @@ fn range_positions(
     end: &Option<Box<Expr>>,
     env: &EnvRef,
     loop_depth: usize,
-    match_depth: usize,
     len: usize,
     collection: &str,
 ) -> Result<Option<(usize, usize)>, Flow> {
@@ -1367,11 +1449,11 @@ fn range_positions(
         return Ok(None);
     }
     let start = match start {
-        Some(expr) => eval(expr, env, loop_depth, match_depth)?,
+        Some(expr) => eval(expr, env, loop_depth)?,
         None => Value::Int(1),
     };
     let end = match end {
-        Some(expr) => eval(expr, env, loop_depth, match_depth)?,
+        Some(expr) => eval(expr, env, loop_depth)?,
         None => Value::Int(len as i64),
     };
     let start = collection_position(&start, len, collection)?;
@@ -1381,8 +1463,8 @@ fn range_positions(
     }
     Ok(Some((start, end)))
 }
-fn values(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<Vec<Value>, Flow> {
-    args.iter().map(|x| eval(x, env, l, m)).collect()
+fn values(args: &[Expr], env: &EnvRef, l: usize) -> Result<Vec<Value>, Flow> {
+    args.iter().map(|x| eval(x, env, l)).collect()
 }
 fn need(args: &[Expr], n: usize, name: &str) -> Result<(), Flow> {
     if args.len() == n {
@@ -1408,7 +1490,7 @@ fn is_valid_identity(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-fn define_let(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<(String, Value), Flow> {
+fn define_let(args: &[Expr], env: &EnvRef, l: usize) -> Result<(String, Value), Flow> {
     need(args, 2, "let")?;
     let name = if let ExprKind::Symbol(name) = &args[0].kind {
         name.clone()
@@ -1421,7 +1503,7 @@ fn define_let(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<(String
     if env.borrow().values.iter().any(|(k, _)| k == &name) {
         return Err(Error::DuplicateBinding(name).into());
     }
-    let mut value = eval(&args[1], env, l, m)?;
+    let mut value = eval(&args[1], env, l)?;
     if let Value::Function(function) = &mut value {
         if let Some(function) = Rc::get_mut(function) {
             function.name = Some(name.clone());
@@ -1433,6 +1515,10 @@ fn define_let(args: &[Expr], env: &EnvRef, l: usize, m: usize) -> Result<(String
     Ok((name, value))
 }
 
+/// What a Ctrl-C inside a REPL session prints. The session stays open, so the
+/// notice ends in a newline of its own.
+const INTERRUPT_NOTICE: &str = "repl: interrupted (:c continues, :q quits)\n";
+
 /// REPL console. Real sessions are driven from the process's controlling
 /// terminal (/dev/tty) so that program stdin is never consumed by the REPL;
 /// tests inject lines through the REPL_INPUT thread-local hook instead.
@@ -1442,6 +1528,25 @@ enum ReplConsole {
         reader: BufReader<fs::File>,
         writer: fs::File,
     },
+}
+
+/// Where a piece of REPL console output goes.
+///
+/// A real session writes only to the controlling terminal, never to the
+/// program's own stdout or stderr, so redirecting a program's output can
+/// neither capture nor interleave with a session. Only the test console falls
+/// back to the program's streams, and then only to the capture hook instead,
+/// when one is collecting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplSink {
+    /// Collected by the REPL_OUTPUT test hook, in the order it was written.
+    Captured,
+    /// The program's stdout: an echoed result, in test mode.
+    ProgramStdout,
+    /// The program's stderr: a prompt, notice or diagnostic, in test mode.
+    ProgramStderr,
+    /// The controlling terminal.
+    Terminal,
 }
 
 fn open_repl_console() -> Result<ReplConsole, Error> {
@@ -1482,44 +1587,73 @@ impl ReplConsole {
             }
         }
     }
-    /// Echo an evaluated result: program stdout in test mode, the terminal otherwise.
-    fn echo(&mut self, text: &str) {
+    /// Whether the capture test hook is collecting.
+    fn capturing() -> bool {
+        REPL_OUTPUT.with(|output| output.borrow().is_some())
+    }
+    /// The terminal handle, for a console that has one.
+    fn writer(&mut self) -> Option<&mut fs::File> {
         match self {
-            ReplConsole::Queued(_) => {
-                REPL_OUTPUT.with(|output| {
-                    let mut capture = output.borrow_mut();
-                    if let Some(lines) = capture.as_mut() {
-                        lines.push(format!("{text}\n"));
-                    } else {
-                        let _ = writeln!(io::stdout(), "{text}");
-                    }
-                });
-            }
-            ReplConsole::Tty { writer, .. } => {
-                let _ = writeln!(writer, "{text}");
-                let _ = writer.flush();
-            }
+            ReplConsole::Tty { writer, .. } => Some(writer),
+            ReplConsole::Queued(_) => None,
         }
     }
-    /// Prompt, diagnostic and notice output: program stderr in test mode, the
-    /// terminal otherwise.
-    fn notify(&mut self, text: &str) {
+    /// Where an echoed result goes.
+    fn echo_sink(&self) -> ReplSink {
         match self {
-            ReplConsole::Queued(_) => {
-                REPL_OUTPUT.with(|output| {
-                    let mut capture = output.borrow_mut();
-                    if let Some(lines) = capture.as_mut() {
-                        lines.push(text.to_owned());
-                    } else {
-                        let _ = write!(io::stderr(), "{text}");
-                        let _ = io::stderr().flush();
-                    }
-                });
+            ReplConsole::Tty { .. } => ReplSink::Terminal,
+            ReplConsole::Queued(_) if Self::capturing() => ReplSink::Captured,
+            ReplConsole::Queued(_) => ReplSink::ProgramStdout,
+        }
+    }
+    /// Where a prompt, a notice or a diagnostic goes.
+    fn notify_sink(&self) -> ReplSink {
+        match self {
+            ReplConsole::Tty { .. } => ReplSink::Terminal,
+            ReplConsole::Queued(_) if Self::capturing() => ReplSink::Captured,
+            ReplConsole::Queued(_) => ReplSink::ProgramStderr,
+        }
+    }
+    /// Echo an evaluated result on the echo sink.
+    fn echo(&mut self, text: &str) {
+        match self.echo_sink() {
+            ReplSink::Captured => REPL_OUTPUT.with(|output| {
+                if let Some(lines) = output.borrow_mut().as_mut() {
+                    lines.push(format!("{text}\n"));
+                }
+            }),
+            ReplSink::ProgramStdout => {
+                let _ = writeln!(io::stdout(), "{text}");
             }
-            ReplConsole::Tty { writer, .. } => {
-                let _ = writer.write_all(text.as_bytes());
-                let _ = writer.flush();
+            ReplSink::Terminal => {
+                if let Some(writer) = self.writer() {
+                    let _ = writeln!(writer, "{text}");
+                    let _ = writer.flush();
+                }
             }
+            ReplSink::ProgramStderr => {}
+        }
+    }
+    /// Prompt, diagnostic and notice output on the notify sink. Unlike an echo,
+    /// this is written verbatim, so a prompt has no newline of its own.
+    fn notify(&mut self, text: &str) {
+        match self.notify_sink() {
+            ReplSink::Captured => REPL_OUTPUT.with(|output| {
+                if let Some(lines) = output.borrow_mut().as_mut() {
+                    lines.push(text.to_owned());
+                }
+            }),
+            ReplSink::ProgramStderr => {
+                let _ = write!(io::stderr(), "{text}");
+                let _ = io::stderr().flush();
+            }
+            ReplSink::Terminal => {
+                if let Some(writer) = self.writer() {
+                    let _ = writer.write_all(text.as_bytes());
+                    let _ = writer.flush();
+                }
+            }
+            ReplSink::ProgramStdout => {}
         }
     }
 }
@@ -1899,15 +2033,17 @@ fn line_text_at(offset: usize, source: &str) -> String {
 struct InterruptedGuard {
     interrupt: bool,
     test_interrupt: bool,
+    test_interrupt_after_read: bool,
 }
 impl Drop for InterruptedGuard {
     fn drop(&mut self) {
         INTERRUPTED.store(self.interrupt, Ordering::Relaxed);
         REPL_INTERRUPT.with(|flag| flag.set(self.test_interrupt));
+        REPL_INTERRUPT_AFTER_READ.with(|flag| flag.set(self.test_interrupt_after_read));
     }
 }
 
-fn eval_repl_line(source: &str, env: &EnvRef, loop_depth: usize, match_depth: usize) -> EResult {
+fn eval_repl_line(source: &str, env: &EnvRef, loop_depth: usize) -> EResult {
     let tokens = lex(source)?;
     let program = Parser { ts: tokens, i: 0 }.program()?;
     push_source(SourceCtx {
@@ -1918,7 +2054,7 @@ fn eval_repl_line(source: &str, env: &EnvRef, loop_depth: usize, match_depth: us
     let outcome = (|| -> EResult {
         let mut result = Value::Null;
         for form in program {
-            result = eval(&form, env, loop_depth, match_depth)?;
+            result = eval(&form, env, loop_depth)?;
         }
         Ok(result)
     })();
@@ -1928,35 +2064,74 @@ fn eval_repl_line(source: &str, env: &EnvRef, loop_depth: usize, match_depth: us
 fn run_repl(
     env: &EnvRef,
     loop_depth: usize,
-    match_depth: usize,
     label: &str,
     execution_span: Span,
     source: Option<SourceCtx>,
+) -> EResult {
+    run_repl_on(
+        env,
+        loop_depth,
+        label,
+        execution_span,
+        source,
+        open_repl_console()?,
+        None,
+    )
+}
+
+/// The session loop itself. `preface` is written before the first prompt, for a
+/// session that was not asked for and has to say why it is there.
+fn run_repl_on(
+    env: &EnvRef,
+    loop_depth: usize,
+    label: &str,
+    execution_span: Span,
+    source: Option<SourceCtx>,
+    mut console: ReplConsole,
+    preface: Option<&str>,
 ) -> EResult {
     // Evaluate REPL lines in a disposable child scope: `let` binds only inside
     // the session, while `set` and reads still reach the program's live state.
     let session = new_env(Some(env.clone()));
     let prompt = repl_prompt(label, &source, execution_span);
-    // A Ctrl-C inside the session cancels the current line and keeps the
-    // session alive; the pre-session state is restored on exit, so a Ctrl-C
-    // after resuming still aborts the program.
+    // A Ctrl-C inside the session opens a nested one, the same as any other
+    // session, so a line that will not finish can be examined where it stopped.
+    // The pre-session state is restored on exit, so a Ctrl-C after resuming
+    // opens a session at the new point rather than at this one again.
     let _guard = InterruptedGuard {
         interrupt: INTERRUPTED.load(Ordering::Relaxed),
         test_interrupt: REPL_INTERRUPT.with(|flag| flag.get()),
+        test_interrupt_after_read: REPL_INTERRUPT_AFTER_READ.with(|flag| flag.get()),
     };
-    let mut console = open_repl_console()?;
+    if let Some(notice) = preface {
+        console.notify(notice);
+    }
     let mut result = Value::Null;
     loop {
+        // A Ctrl-C at an idle prompt is not interrupting anything: the session it
+        // would open is already open. Report it and redraw, so the keypress is
+        // never silently dropped.
         let interrupted = INTERRUPTED.swap(false, Ordering::Relaxed)
             || REPL_INTERRUPT.with(|flag| flag.replace(false));
         if interrupted {
-            console.notify("repl: interrupted (:c continues, :q quits)\n");
+            console.notify(INTERRUPT_NOTICE);
             continue;
         }
         console.notify(&prompt);
         let Some(raw) = console.read_line() else {
             break;
         };
+        // A Ctrl-C that landed while the console was blocked reading is not
+        // seen until now: the terminal driver has already flushed whatever was
+        // typed, and std retries the read, so it only returns once a whole line
+        // has arrived. The line in hand is therefore the one typed *after* the
+        // cancel, and it is evaluated. Cancelling it too, as this used to, threw
+        // away input the user meant to keep and its result was never echoed.
+        let interrupted = INTERRUPTED.swap(false, Ordering::Relaxed)
+            || REPL_INTERRUPT_AFTER_READ.with(|flag| flag.replace(false));
+        if interrupted {
+            console.notify(INTERRUPT_NOTICE);
+        }
         let line = raw.trim_end_matches(['\r', '\n']).to_owned();
         if line.trim().is_empty() {
             continue;
@@ -1979,7 +2154,7 @@ fn run_repl(
             }
             continue;
         }
-        match eval_repl_line(&line, &session, loop_depth, match_depth) {
+        match eval_repl_line(&line, &session, loop_depth) {
             Ok(value) => {
                 result = value;
                 let echo = repl_echo(&result);
@@ -1991,13 +2166,6 @@ fn run_repl(
                 if matches!(error, Error::Quit(_)) {
                     // A nested (repl) quit aborts the whole run, not just this session.
                     return Err(Flow::Error(error));
-                }
-                if matches!(error, Error::Interrupted) {
-                    // Ctrl-C landed mid-line: cancel the line, stay in the session.
-                    INTERRUPTED.store(false, Ordering::Relaxed);
-                    REPL_INTERRUPT.with(|flag| flag.set(false));
-                    console.notify("repl: interrupted (:c continues, :q quits)\n");
-                    continue;
                 }
                 // Errors inside a REPL line never propagate to the program.
                 let span = match &error {
@@ -2012,17 +2180,17 @@ fn run_repl(
     Ok(result)
 }
 
-fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span: Span) -> EResult {
+fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, call_span: Span) -> EResult {
     if let ExprKind::Symbol(name) = &head.kind {
         match name.as_str() {
             "let" => {
-                define_let(args, env, l, m)?;
+                define_let(args, env, l)?;
                 return Ok(Value::Null);
             }
             "set" => {
                 need(args, 2, "set")?;
                 let loc = location(&args[0], env).map_err(Flow::Error)?;
-                let v = eval(&args[1], env, l, m)?;
+                let v = eval(&args[1], env, l)?;
                 // Resolve the write target first: aliases on the way to the
                 // position are written through, so a cycle check against the
                 // raw location would miss chains that land on it.
@@ -2041,11 +2209,11 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 if args.len() != 2 && args.len() != 3 {
                     return Err(Error::Arity("if expects 2 or 3 arguments".into()).into());
                 }
-                if truth(&eval(&args[0], env, l, m)?) {
-                    return eval(&args[1], env, l, m);
+                if truth(&eval(&args[0], env, l)?) {
+                    return eval(&args[1], env, l);
                 }
                 return if args.len() == 3 {
-                    eval(&args[2], env, l, m)
+                    eval(&args[2], env, l)
                 } else {
                     Ok(Value::Null)
                 };
@@ -2097,14 +2265,18 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 if args.len() == 2 {
                     return Ok(fun);
                 }
-                return invoke(fun, values(&args[2..], env, l, m)?, call_span);
+                return invoke(fun, values(&args[2..], env, l)?, call_span);
             }
             "loop" => {
                 let local = new_env(Some(env.clone()));
                 loop {
-                    check_interrupted().map_err(Flow::Error)?;
+                    if take_interrupt() {
+                        // The loop's own scope, so a session can read and set
+                        // the bindings the loop is working on.
+                        interrupt_into_repl(&local, l + 1, call_span)?;
+                    }
                     for a in args {
-                        match eval(a, &local, l + 1, m) {
+                        match eval(a, &local, l + 1) {
                             Ok(_) => {}
                             Err(Flow::Continue) => break,
                             Err(Flow::Break(v)) => return Ok(v),
@@ -2123,7 +2295,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 return Err(Flow::Break(if args.is_empty() {
                     Value::Null
                 } else {
-                    eval(&args[0], env, l, m)?
+                    eval(&args[0], env, l)?
                 }));
             }
             "continue" => {
@@ -2141,8 +2313,8 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                     );
                 }
                 for p in args.chunks(2) {
-                    match eval(&p[0], env, l, m + 1) {
-                        Ok(v) if truth(&v) => return eval(&p[1], env, l, m + 1),
+                    match eval(&p[0], env, l) {
+                        Ok(v) if truth(&v) => return eval(&p[1], env, l),
                         Ok(_) => {}
                         Err(x) => return Err(x),
                     }
@@ -2152,7 +2324,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
             "and" => {
                 let mut r = Value::Bool(true);
                 for a in args {
-                    r = eval(a, env, l, m)?;
+                    r = eval(a, env, l)?;
                     if !truth(&r) {
                         return Ok(r);
                     }
@@ -2162,7 +2334,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
             "or" => {
                 let mut r = Value::Bool(false);
                 for a in args {
-                    r = eval(a, env, l, m)?;
+                    r = eval(a, env, l)?;
                     if truth(&r) {
                         return Ok(r);
                     }
@@ -2171,7 +2343,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
             }
             "not" => {
                 need(args, 1, "not")?;
-                return Ok(Value::Bool(!truth(&eval(&args[0], env, l, m)?)));
+                return Ok(Value::Bool(!truth(&eval(&args[0], env, l)?)));
             }
             "expect" => {
                 if args.len() != 2 && args.len() != 3 {
@@ -2181,13 +2353,13 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                     ))
                     .into());
                 }
-                let actual = eval(&args[0], env, l, m)?;
-                let expected = eval(&args[1], env, l, m)?;
+                let actual = eval(&args[0], env, l)?;
+                let expected = eval(&args[1], env, l)?;
                 if equals(&actual, &expected) {
                     return Ok(Value::Bool(true));
                 }
                 let comment = if args.len() == 3 {
-                    as_str(eval(&args[2], env, l, m)?)?
+                    as_str(eval(&args[2], env, l)?)?
                 } else {
                     "expectation failed".into()
                 };
@@ -2204,7 +2376,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 // native module ("io", "str", "http") or a Lisp module previously
                 // defined with `(let name {…})`. `use` validates the module's
                 // syntax and registers it; natives additionally bind like `let`.
-                let name = as_str(eval(&args[0], env, l, m)?)?;
+                let name = as_str(eval(&args[0], env, l)?)?;
                 if let Some(factory) = modules::registry().remove(&name) {
                     let module = factory();
                     validate_module(&module).map_err(Flow::Error)?;
@@ -2231,10 +2403,10 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 env.borrow_mut().modules.push(name);
                 return Ok(module);
             }
-            "$" => return format_value(args, env, l, m, call_span),
+            "$" => return format_value(args, env, l, call_span),
             "eval" => {
                 need(args, 1, "eval")?;
-                let source = as_str(eval(&args[0], env, l, m)?)?;
+                let source = as_str(eval(&args[0], env, l)?)?;
                 let program = (|| -> Result<Vec<Expr>, Error> {
                     let ts = lex(&source)?;
                     Parser { ts, i: 0 }.program()
@@ -2251,7 +2423,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 let mut result = Value::Null;
                 let outcome = (|| {
                     for form in program {
-                        result = match eval(&form, env, l, m) {
+                        result = match eval(&form, env, l) {
                             Ok(value) => value,
                             Err(error) => {
                                 LAST_ERROR_SPAN.with(|span| span.set(Some(call_span)));
@@ -2271,12 +2443,12 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 let label = if args.is_empty() {
                     String::new()
                 } else {
-                    as_str(eval(&args[0], env, l, m)?)?
+                    as_str(eval(&args[0], env, l)?)?
                 };
                 // The innermost source being evaluated right now is the one the
                 // (repl) form lives in; :l/:i/:bt resolve spans against it.
                 let session_source = EVAL_SOURCES.with(|sources| sources.borrow().last().cloned());
-                return run_repl(env, l, m, &label, call_span, session_source);
+                return run_repl(env, l, &label, call_span, session_source);
             }
             _ => {
                 if [
@@ -2285,7 +2457,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
                 ]
                 .contains(&name.as_str())
                 {
-                    let arguments = values(args, env, l, m)?;
+                    let arguments = values(args, env, l)?;
                     // Builtin errors (e.g. DivisionByZero) should point at the
                     // call, not at the last argument evaluated above.
                     LAST_ERROR_SPAN.with(|span| span.set(Some(call_span)));
@@ -2294,8 +2466,8 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span:
             }
         }
     }
-    let value = eval(head, env, l, m)?;
-    let arguments = values(args, env, l, m)?;
+    let value = eval(head, env, l)?;
+    let arguments = values(args, env, l)?;
     invoke_operator(value, arguments, call_span)
 }
 fn invoke_operator(value: Value, vals: Vec<Value>, call_span: Span) -> EResult {
@@ -2526,7 +2698,7 @@ fn invoke(f: Value, vals: Vec<Value>, call_span: Span) -> EResult {
         ))
         .into());
     }
-    let result = eval(&f.body, &e, 0, 0);
+    let result = eval(&f.body, &e, 0);
     if result.is_err() {
         CALL_TRACE.with(|trace| {
             LAST_TRACE.with(|last| {
@@ -2621,12 +2793,12 @@ fn emit_capture(
     }
     Ok(())
 }
-fn format_value(args: &[Expr], env: &EnvRef, l: usize, m: usize, call_span: Span) -> EResult {
+fn format_value(args: &[Expr], env: &EnvRef, l: usize, call_span: Span) -> EResult {
     if args.is_empty() {
         return Err(Error::Arity("$ expects format string".into()).into());
     }
-    let fmt = as_str(eval(&args[0], env, l, m)?)?;
-    let vs = values(&args[1..], env, l, m)?;
+    let fmt = as_str(eval(&args[0], env, l)?)?;
+    let vs = values(&args[1..], env, l)?;
     // Format-string errors (trailing %, FormatArityError, …) should point at
     // the `$` call, not at the last argument evaluated above.
     LAST_ERROR_SPAN.with(|span| span.set(Some(call_span)));
@@ -3206,11 +3378,17 @@ fn binary_numeric_with_operation(
             .ok_or_else(|| Error::Math("IntegerOverflow".into()));
     }
     if name == "pow" && left_int.is_some() && right_int.is_some() {
-        return right_int
-            .and_then(|right| u32::try_from(right).ok())
-            .and_then(|right| left_int.unwrap().checked_pow(right))
-            .map(Value::Int)
-            .ok_or_else(|| Error::Math("IntegerOverflow".into()));
+        // Only a non-negative exponent can have an integer result. A negative
+        // one falls through to floating point, as a fractional exponent already
+        // does, so (pow 2 -1) is 0.5 just as (pow 2.0 -1) is.
+        if let (Some(left), Some(right)) = (left_int, right_int) {
+            if let Ok(right) = u32::try_from(right) {
+                return left
+                    .checked_pow(right)
+                    .map(Value::Int)
+                    .ok_or_else(|| Error::Math("IntegerOverflow".into()));
+            }
+        }
     }
     match (left_int, right_int) {
         (Some(left), Some(right)) if name == "div" => {
@@ -3393,7 +3571,7 @@ fn interpreter_main() -> i32 {
                 });
                 let outcome = (|| {
                     for x in p {
-                        eval(&x, &e, 0, 0).map_err(|e| (flow_err(e), false))?;
+                        eval(&x, &e, 0).map_err(|e| (flow_err(e), false))?;
                     }
                     Ok(())
                 })();

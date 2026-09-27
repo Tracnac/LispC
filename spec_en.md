@@ -933,10 +933,28 @@ silent wraparound. A few details:
 - `sub` of the most negative integer overflows.
 - `pow 2 62` is fine, `pow 2 63` overflows.
 - `pow 0 0` is 1 and `pow 0 5` is 0.
-- `pow 2 -1` reports `IntegerOverflow`, even though the real cause is a
-  negative exponent. `pow 2.0 -1` is 0.5.
 - `bit-shl 1 63` overflows, because the result does not fit a signed 64 bit
   integer.
+
+`pow` is integer arithmetic only when both operands are integers and the
+exponent is not negative. Anything else is floating point:
+
+```
+(pow 2 3)      ; 8       integer
+(pow 2 0)      ; 1       integer
+(pow 2 63)     ; IntegerOverflow
+(pow 2 -1)     ; 0.5
+(pow 2 -2)     ; 0.25
+(pow 2 1.5)    ; 2.8284271247461903
+(pow 2.0 -1)   ; 0.5
+(pow 0 -1)     ; Inf
+```
+
+A negative exponent has no integer result, so it is not an overflow and is not
+reported as one. It is computed in floating point, as a fractional exponent
+already was, so an integer base does not by itself mean integer arithmetic. The
+float path does not overflow, it saturates to `Inf`, so `pow 2.0 1000` is a very
+large float rather than an error.
 
 Mixing an integer and a float in an arithmetic operation promotes to float. A
 string, bool or null in arithmetic gives a `TypeError`.
@@ -1705,6 +1723,10 @@ and a `^` caret under the column:
 The column is counted in characters, not bytes, so a multi-byte character on the
 same line counts as one.
 
+A lexer error is reported at the start of the token being read, so an
+unterminated string is reported at its opening quote. The position comes from
+the source that failed, never from an earlier one.
+
 Errors that cross user functions also print a call trace, one line per frame,
 innermost first:
 
@@ -1724,10 +1746,11 @@ Note that the line number in a diagnostic does not account for a shebang line
 that was removed before parsing, while the REPL's own line numbers do. See
 Section 21 and Appendix C.
 
-On Unix, Ctrl-C is turned into `Interrupted` and points at the expression
-currently being evaluated.
+On Unix, Ctrl-C opens a session where it interrupted. See Section 20.10. It
+ends the run with `Interrupted` only when there is no controlling terminal to
+open a session on, which is reported like any other error.
 
-`Quit` is raised only by the REPL's `:q` command.
+`Quit` is raised only by the REPL's `:q` command, from any session depth.
 
 ---
 
@@ -1786,8 +1809,10 @@ native function as `<native fn>`:
 > _              ; nothing
 ```
 
-The echo goes to the terminal, not to the program's stdout, so redirecting
-stdout does not capture it. Blank lines are ignored.
+All session output, the echo, the prompts, the notices and the diagnostics, goes
+to the terminal. None of it goes to the program's own stdout or stderr, so
+redirecting either does not capture or interleave with a session. Blank lines
+are ignored.
 
 ### 20.3 Commands
 
@@ -1922,9 +1947,12 @@ session is reported as such.
 - `set` and reads reach the program's live state.
 - An error on a line is displayed as `<repl>:1:col: message` with the line and a
   caret, and the session continues. It never propagates to the program. A parse
-  error points at the offending column, a runtime error at the failing call.
+  error points at the offending column, a runtime error at the failing call. A
+  lexer error is positioned as in Section 18, so a line that follows a longer one
+  is not reported against the longer one's offsets.
 - `(break)` and `(continue)` typed in a session propagate and act on the
-  enclosing loop.
+  enclosing loop. This holds for a session opened by Ctrl-C, which is given the
+  loop depth it interrupted at, so a loop that will not finish can be left.
 - A nested `(repl)` works, recursively, and its `:q` aborts the whole run.
 
 A `:q` at any depth ends the run with exit code 1. The `Quit` error is reported
@@ -1946,7 +1974,9 @@ The program's stdin is never consumed by the session, even when the program was
 loaded from stdin, so `io.read 0` keeps reading the original stdin.
 
 Without a controlling terminal, `(repl)` fails. There is no silent fallback to
-stdin.
+stdin. A Ctrl-C with no terminal to open a session on ends the run with
+`Interrupted` instead, and says nothing about the missing terminal: someone who
+pressed Ctrl-C to stop a program did not ask about the terminal. See 20.10.
 
 ```
 prog.lisp:2:1: IOError: repl: cannot open the controlling terminal (/dev/tty): Device not configured (os error 6)
@@ -1956,12 +1986,112 @@ prog.lisp:2:1: IOError: repl: cannot open the controlling terminal (/dev/tty): D
 
 ### 20.10 Ctrl-C
 
-During a session, Ctrl-C cancels the current line, prints
-`repl: interrupted (:c continues, :q quits)`, and the session continues.
+Ctrl-C opens a session. It does not end the run, and it does not cancel the line
+in flight. The program is interrupted where it was, and a session is opened on
+that exact state, so the bindings, the loop counters and the call stack that
+made the program interesting are all reachable.
 
-The Ctrl-C disposition from before the session is restored on exit, so a Ctrl-C
-after `:c` still aborts the run as before. Outside a session, Ctrl-C keeps
-aborting the run with `Interrupted`.
+The program below searches for 19999999 by counting, and takes long enough to
+interrupt.
+
+```
+(use "io")
+(let find (fn (target) ((let i 0)
+  (loop
+    (if (ge i 20000000)
+        (break -1)
+        (if (eq i target)
+            (break i)
+            (set i (add i 1))))))))
+(let answer (find 19999999))
+(io.write 1 ($ "answer=%s\n" answer))
+```
+
+The transcript is what a terminal shows.
+
+```
+$ ./small-lisp search.lisp
+^Crepl: interrupted (:c continues, :q quits)
+search.lisp:4> i
+860354
+search.lisp:4> :bt
+backtrace (1 frame)
+  find at search.lisp:10:13   ((let answer (find 19999999)))
+search.lisp:4> (set i 20000000)
+search.lisp:4> :c
+answer=-1
+```
+
+The prompt names the file and line the program was on. Which line that is depends
+on where the interrupt was noticed: the enclosing `loop`, or the innermost
+expression under evaluation, whichever the check saw first. A signal has no
+position of its own, so on the program above the prompt reads `search.lisp:4>`,
+`search.lisp:7>` or `search.lisp:9>` from run to run, and every one of them is a
+line the program was on. The transcript is one run.
+
+Every command of Section 20.3 works, and so do `let` and `set`, meaning what they
+mean in a session started by `(repl)`: `let` binds only in the session, `set` and
+reads reach the program's live state.
+
+The session is opened with the scope that was live where the interrupt landed.
+A Ctrl-C inside a `loop` gets the loop's own scope, which is what makes `i`
+above readable and settable rather than visible from outside as nothing. It also
+gets the loop depth, so `(break)` and `(continue)` still leave the loop, as in
+Section 20.8.
+
+`:c` resumes the interrupted computation, which then runs on to wherever it was
+going: above, the corrected `i` ends the search at once. `:q` ends the run with
+`Quit`, as in any session. A program that will not finish is therefore stopped
+by typing `:q`, not by a second Ctrl-C.
+
+While a session is open, Ctrl-C opens another one, at the point that session
+interrupted. Sessions nest, exactly as `(repl)` nests, so `:q` at any depth ends
+the run.
+
+The notice `repl: interrupted (:c continues, :q quits)` is printed before the
+first prompt of a session opened this way, so a session that was not asked for
+says why it is there.
+
+Two things bound this. A session needs a controlling terminal, so with none the
+run still ends, with `Interrupted` and a diagnostic. And a blocked read cannot
+be woken by a signal, because the standard library retries an interrupted read,
+so a Ctrl-C typed at a prompt is noticed when the next line is entered rather
+than at the keypress. What happens then depends on who was waiting:
+
+| Ctrl-C lands | The notice appears | The input |
+| ------------ | ------------------ | --------- |
+| while the evaluator is running | at once, the session opens | none at risk |
+| while a session reads a line | when that read returns | the line in hand is evaluated |
+| while a native function reads | at the evaluator's next check | the line the read returned is used |
+
+The second and third rows used to end the run, which threw away whatever was
+typed after the cancel. In the third case that is the very line the read was
+waiting for, so a program that prompts and reads used to lose it. A Ctrl-C
+at the `first> ` prompt of `(let a (ask "first> "))`, then typing `hello`:
+
+```
+first> ^C
+hello
+prog.lisp:2:34: Interrupted          ; before: the run ended, hello discarded
+(let ask (fn (q) ((io.write 1 q) (io.read 0))))
+                                 ^
+call trace:
+  ask at prog.lisp:3:8
+```
+
+and now:
+
+```
+first> ^C
+hello
+repl: interrupted (:c continues, :q quits)
+prog.lisp:4>                          ; a session, and hello already read
+```
+
+The same flush is why the second row is safe. The terminal driver discards what
+was being typed on Ctrl-C, so the line in flight is already gone by the time
+anything can act, and the read returns the line typed *after* the cancel. That
+line is the one evaluated.
 
 ---
 
@@ -2028,7 +2158,7 @@ An empty file runs and exits with 0.
 | `(mul ...)` | 0 or more | Product. Identity 1. |
 | `(div a ...)` | 1 or more | Left fold. Unary is the reciprocal as a float. `div 0` is DivisionByZero. |
 | `(mod a b)` | exactly 2 | Integers only. Sign of the dividend. |
-| `(pow a b)` | exactly 2 | Integer path is checked. Float path is a float power. |
+| `(pow a b)` | exactly 2 | Integer when both are integers and `b` is not negative, checked. Otherwise a float power. |
 | `(eq ...)` | 0 or more | True when all arguments are pairwise equal. |
 | `(ne ...)` | 0 or more | Exact negation of `eq`. |
 | `(lt ...)` | 0 or more | Numeric chained less-than. |
@@ -2143,6 +2273,15 @@ is auditable. Each item was verified against the interpreter.
 8. Specifier list. `%h` fixed widths exist, `%o` fixed widths do not, and `%f`
    has no width or precision. The doubled `FormatError:` prefix on some messages
    is documented in Section 15.11.
+9. Ctrl-C in a REPL session. spec.txt section 20 says it cancels the current
+   line. It cannot: the terminal discards that line itself, and the interpreter
+   was discarding the next one as well, so the result was never echoed. Section
+   20.10 here gives the three positions that do exist.
+10. Ctrl-C outside a REPL session. spec.txt section 18 says it becomes
+    `Interrupted`, ending the run. It opens a session at the point it
+    interrupted instead, so a program that will not finish can be inspected,
+    corrected and resumed, and is ended with `:q`. `Interrupted` is now only the
+    no-controlling-terminal case. Section 20.10 here.
 
 ### Implementation behaviour worth knowing
 
@@ -2155,12 +2294,18 @@ is auditable. Each item was verified against the interpreter.
   position".
 - `io.close` on descriptor 1 or 2 succeeds and removes it, after which all writes
   to it fail.
-- `pow 2 -1` reports `IntegerOverflow` rather than anything about exponents.
 - `mod` with a float operand is a `TypeError`.
 - `def:` in the REPL has a third message, `defined outside the current source`,
   which spec.txt section 20 does not list.
 - A decoded JSON object keeps its keys in alphabetical order, not in document
   order.
+- A Ctrl-C during a REPL read is noticed only when the read returns, so its
+  notice lands after the next line is entered. A read cannot be woken by a
+  signal here. See Section 20.10.
+- A Ctrl-C is not seen while a native function is running, except at the reads
+  that check for it. A session opens at the evaluator's next check instead,
+  which is a node or a loop iteration away, and is not at all if the program
+  ends first. See Section 20.10.
 - A slice or a multi-index selector must be the last step of a postfix chain.
   Section 1.3 here is new.
 - `:i` scope words are `session`, `enclosing` and `outer`.

@@ -18,7 +18,7 @@ fn run(src: &str) -> Result<Value, Error> {
     let outcome = (|| {
         let mut result = Value::Null;
         for form in program {
-            result = eval(&form, &env, 0, 0).map_err(flow_err)?;
+            result = eval(&form, &env, 0).map_err(flow_err)?;
         }
         Ok(result)
     })();
