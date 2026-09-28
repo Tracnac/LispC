@@ -1293,7 +1293,9 @@ file it returns `_`.
 
 Both LF and CRLF terminators are removed, as a unit. Reads are buffered and the
 buffer belongs to the opened descriptor, so data prefetched by one read stays
-available to the next read on the same descriptor.
+available to the next read on the same descriptor. A write to the same
+descriptor discards the prefetched bytes and the next read refills from the
+file; see Section 13.5.
 
 A descriptor that is not readable, and a descriptor that is not open, give an
 `IOError`. `io.read 1` and `io.read 2` are errors. `io.read 0` reads stdin.
@@ -1325,11 +1327,33 @@ descriptor 1 fails with `IOError: invalid file descriptor 1`.
 
 ### 13.5 Mixed modes
 
-For `r+`, `w+` and `a+`, reads and writes share the same file and the same file
-position. A write goes to the current file position. Because reading is
-buffered, a read has already advanced that position past what it consumed, so an
-interleaved write lands after the prefetched block. `a+` is the exception: it
-always writes at the end of the file.
+For `r+`, `w+` and `a+`, reads and writes go to the same file. Where a write
+lands is decided by the mode.
+
+`r+` and `w+` share a single position between reads and writes. A write goes at
+the position the reads have reached and leaves the position just past the bytes
+it wrote, so a read after a write continues from there. Two writes in a row
+therefore accumulate rather than overwrite each other, and a write after a read
+overwrites from the point that read reached. Given three lines `aaa`, `bbb` and
+`ccc`:
+
+```
+(let fd (io.open "file:PATH?mode=r+"))
+(io.read fd)        ; "aaa", leaving the position at offset 4
+(io.write fd "Z")   ; overwrites the first byte of `bbb`, at offset 4
+(io.read fd)        ; "bb", from just past the write
+```
+
+`a+` has two positions rather than one. Its write always goes to the end of the
+file, wherever the reads have reached, and it leaves the read position alone, so
+a read after an appending write continues from where the reads were.
+
+A write discards the bytes the read buffer has prefetched but not yet returned,
+because they sit at or after the position being written and are no longer what
+the next read should produce. The buffer refills from the file on the next read,
+so a read and a write cannot be interleaved inside a prefetched block. A
+descriptor already read to end of file has no prefetched bytes left to discard,
+so reading a file and then writing to it does not re-read anything.
 
 A write-only descriptor (`w`, `a`) is not readable. A read-only descriptor (`r`)
 is not writable.
@@ -2442,10 +2466,6 @@ is auditable. Each item was verified against the interpreter.
 - Shebang line offset. Error line numbers ignore the removed shebang line. The
   REPL's line numbers include it. spec.txt section 20 documents the REPL side
   only.
-- `r+` and `w+` write position. A write goes to the underlying file position,
-  which the buffered reader has already advanced past, so an interleaved write
-  lands after the prefetched block. spec.txt section 13 says only "the current
-  position".
 - `io.close` on descriptor 1 or 2 succeeds and removes it, after which all writes
   to it fail.
 - `mod` with a float operand is a `TypeError`.

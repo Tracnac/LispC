@@ -176,9 +176,145 @@ fn read_write_mode_r_plus_reads_then_writes_through_one_handle() {
     );
     let value = run(&source).unwrap();
     assert!(matches!(value, Value::Str(line) if line == "initial"));
-    // The write lands at the read position (EOF), extending the file: reads
-    // and writes share one stream position on the same underlying file.
+    // The read consumed the only line, so the position is at end of file and
+    // the write extends the file. This fixture cannot tell the position from
+    // the buffer's prefetch boundary, because the two coincide here; the tests
+    // below use a fixture where they do not.
     assert_eq!(fs::read_to_string(&path).unwrap(), "initial!");
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn r_plus_write_lands_at_the_read_position_and_not_the_prefetch_boundary() {
+    let path = env::temp_dir().join(format!(
+        "small_lisp_io_rplus_pos_{}.txt",
+        std::process::id()
+    ));
+    // Two four-byte lines. The reader prefetches both, so before the fix the
+    // write landed at offset 8, the end of the prefetched block, instead of
+    // offset 4, which is where the one read left the stream.
+    fs::write(&path, "aaa\nbbb\n").unwrap();
+    let source = format!(
+        r#"(use "io")
+            (let fd (io.open "file:{}?mode=r+"))
+            (io.read fd)
+            (io.write fd "ZZZ")
+            (io.close fd)"#,
+        path.display(),
+    );
+    run(&source).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "aaa\nZZZ\n");
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn r_plus_write_position_does_not_depend_on_the_buffer_size() {
+    let path = env::temp_dir().join(format!(
+        "small_lisp_io_rplus_big_{}.txt",
+        std::process::id()
+    ));
+    // A file well past BufReader's 8 KiB default capacity, so the prefetch
+    // boundary and the read position are far apart. A single read stops at
+    // offset 4; the write belongs there, not at 8192 or at end of file.
+    let mut fixture = String::from("aaa\n");
+    fixture.push_str(&"x".repeat(9000));
+    fs::write(&path, &fixture).unwrap();
+    let source = format!(
+        r#"(use "io")
+            (let fd (io.open "file:{}?mode=r+"))
+            (io.read fd)
+            (io.write fd "Z")
+            (io.close fd)"#,
+        path.display(),
+    );
+    run(&source).unwrap();
+    let after = fs::read(&path).unwrap();
+    assert_eq!(after.len(), 9004);
+    assert_eq!(&after[..5], b"aaa\nZ");
+    assert!(after[5..].iter().all(|byte| *byte == b'x'));
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn r_plus_read_after_a_write_sees_the_post_write_bytes() {
+    let path = env::temp_dir().join(format!("small_lisp_io_rplus_rw_{}.txt", std::process::id()));
+    // Reading "aaa" leaves the position at 4, the first byte of "bbb", which
+    // the reader has already prefetched. The write overwrites that byte, so
+    // the prefetched copy is stale and the second read must come from the file
+    // rather than from the buffer, or it would report the line as it was.
+    fs::write(&path, "aaa\nbbb\n").unwrap();
+    let source = format!(
+        r#"(use "io")
+            (let fd (io.open "file:{}?mode=r+"))
+            (let before (io.read fd))
+            (io.write fd "Z")
+            (let after (io.read fd))
+            (io.close fd)
+            [before after]"#,
+        path.display(),
+    );
+    let value = run(&source).unwrap();
+    assert_eq!(debug_render(&value), r#"Array([Str("aaa"), Str("bb")])"#);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "aaa\nZbb\n");
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn w_plus_successive_writes_share_one_position() {
+    let path = env::temp_dir().join(format!(
+        "small_lisp_io_wplus_two_{}.txt",
+        std::process::id()
+    ));
+    fs::write(&path, "old").unwrap();
+    let source = format!(
+        r#"(use "io")
+            (let fd (io.open "file:{}?mode=w+"))
+            (io.write fd "one\n")
+            (io.write fd "two\n")
+            (io.close fd)"#,
+        path.display(),
+    );
+    run(&source).unwrap();
+    // The second write goes to the position the first one left, at offset 4, so
+    // the two accumulate. A write to offset 0 would leave "two\ntwo\n" instead.
+    assert_eq!(fs::read_to_string(&path).unwrap(), "one\ntwo\n");
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn a_plus_append_does_not_cut_the_read_stream_short() {
+    let path = env::temp_dir().join(format!(
+        "small_lisp_io_aplus_mid_{}.txt",
+        std::process::id()
+    ));
+    // Appending moves the file cursor to the new end of file. The read buffer
+    // refills from the cursor, so without being put back the reads would resume
+    // at the end and skip everything the prefetch had not reached: this
+    // fixture is past the buffer's capacity precisely so that the tail is
+    // unreachable that way.
+    let mut fixture = String::from("one\n");
+    fixture.push_str(&"x\n".repeat(9000));
+    fixture.push_str("last\n");
+    fs::write(&path, &fixture).unwrap();
+    let source = format!(
+        r#"(use "io")
+            (let fd (io.open "file:{}?mode=a+"))
+            (io.read fd)
+            (io.write fd "Z")
+            (let seen 0)
+            (loop (set seen (add seen 1)) (if (eq (io.read fd) _) (break)))
+            (io.close fd)
+            seen"#,
+        path.display(),
+    );
+    let value = run(&source).unwrap();
+    // 9000 filler lines, then "last", then the appended "Z" with no terminator
+    // of its own, and the read that reported end of file.
+    assert_eq!(debug_render(&value), "Int(9003)");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        format!("one\n{}last\nZ", "x\n".repeat(9000))
+    );
     fs::remove_file(path).unwrap();
 }
 

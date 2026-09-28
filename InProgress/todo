@@ -1,7 +1,7 @@
 Open work
 =========
 
-Thirteen entries, and every one of them is still open: four bugs, one documented timing choice,
+Twelve entries, and every one of them is still open: three bugs, one documented timing choice,
 three performance items, and five records of work that was checked and dropped. All were
 re-verified against `target/release/small-lisp` at `911040f`, not carried over from an earlier
 note, and the source line numbers were corrected in the same pass because earlier commits had
@@ -24,19 +24,6 @@ Bug
   the call guard's, plus one in `copy`/render, with the threshold calibrated against the 256 MB
   stack rather than guessed.
 
-- `r+`/`w+` writes land at the reader's prefetch offset, not the read position.
-  `src/modules/io.rs:266` does `stream.reader.get_mut().write_all(...)` with no `seek`, and the
-  `BufReader` has already pulled the OS cursor forward. Verified: the write lands on the
-  `BufReader` fill boundary. With `aaa\nbbb\n`, one `io.read` logically consumes 4 bytes and a
-  following write of `ZZZ` lands at offset 8. With a 9005-byte file (`aaa\n` then 9 KB) it lands
-  at offset 8192, which is `BufReader`'s default capacity — an implementation detail of the
-  buffer, not a position the program ever asked for. `src/tests/io.rs:164-182` passes only because
-  its fixture is the single line `initial`, 7 bytes, where the prefetch offset and the
-  read position coincide at end of file; a two-line fixture fails. Fix options: (a) drop
-  the `BufReader` for writable handles and use one `File` with an explicit `seek` per
-  operation; (b) track a logical position beside the buffer and seek before each write.
-  (a) is simpler and leaves read-only buffering alone. (Drift.md G4, A4, C1)
-
 - A missing bracket before a `[` selector is silently read as another argument. `postfix_tail`
   (`src/main.rs:779-829`) requires strict adjacency, `token.span.start == e.span.end` at lines
   785 and 807, and gives no diagnostic when the guard fails — the bracketed form simply becomes
@@ -51,7 +38,7 @@ Bug
 - An `expect` failure can be uninformative, because the debug form it is required to use cannot
   show identity. This is not a code defect: spec_en.md §11.6:1189-1190 requires both values to
   use the debug form of §15.9, and `src/main.rs:2426-2427` does exactly that. The consequence is
-  the problem, and it has two faces. §15.9:1640 documents a function's debug form as
+  the problem, and it has two faces. §15.9:1664 documents a function's debug form as
   `Function(b, c)`, its parameter list only, so two distinct closures both built from
   `(fn (x) x)` produce `expected Function(x), got Function(x)` — verified. The identity rule is
   honoured and the message still says nothing, which is the one case where the assertion is
@@ -66,7 +53,7 @@ Bug
 Diagnostic timing, a documented choice rather than a defect:
 
 - A Ctrl-C that lands during a blocking read is noticed when the read returns, so the notice
-  appears after the user's next Enter. `read_line` (`src/modules/io.rs:230-239`) calls
+  appears after the user's next Enter. `read_line` (`src/modules/io.rs:322-331`) calls
   `check_interrupted()` before and after the read, and `std` retries `EINTR` internally, so the
   signal cannot be observed before the read returns. Making it immediate needs either a
   poll/select loop on the tty (a dependency or hand-written FFI) or I/O from the `ctrlc` handler
