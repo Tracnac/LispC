@@ -757,7 +757,36 @@ its environment by pointer, so recursion needs no `letrec`:
 (fact 5)   ; 120
 ```
 
-### 6.1 fn with an immediate call
+### 6.1 The parameter list must use ()
+
+The parameter list of `fn` is a parenthesised list of names, and the `()` is
+mandatory. There is no way to write a name in front of it, so a function has
+no name of its own in the source: the name comes from the `let` that binds it,
+and `fn` has no form that binds a function under a name of its own.
+
+```
+(fn (a b) (add a b))   ; a function of arity 2
+(fn () 7)              ; a function of arity 0
+(fn hlp (y) y)         ; TypeError: fn parameters must use ()
+```
+
+Anything that is not a parenthesised form in that position gives
+`TypeError: fn parameters must use ()`, so `(fn 1 (y) y)`, `(fn t (y) y)`,
+`(fn [1] (y) y)` and `(fn {a: 1} (y) y)` are all that error. Fewer than two
+forms after `fn` is a `ArityError: fn expects parameters and body` instead.
+
+Inside the parentheses every entry must be a name. A parameter that is not a
+name is a `TypeError: function parameter must be identifier`, so `(fn (1) 1)`,
+`(fn (a 1) a)`, `(fn (a [b]) a)` and `(fn ((a)) 1)` are all that error. The
+reserved names of Section 2.2 are a further `TypeError: reserved name cannot be
+used as a parameter: <name>`, and a name that reads as a literal, as in `(fn (t)
+1)`, is not a name at all, so it is the identifier error rather than the
+reserved one.
+
+Because the list is mandatory, `%x` writes a function as `(fn (parameters)
+body)` with no name, which is the only form that reads back (Section 15.4).
+
+### 6.2 fn with an immediate call
 
 `fn` with more than two arguments does not produce a function. It builds a
 function from the parameter list and the first body form, then calls it with the
@@ -792,7 +821,7 @@ To write a function with a body of several forms, wrap the body in a `()`:
 (fn (b) ((let c 1) (add b c)) 41)   ; 42
 ```
 
-### 6.2 Recursion limit
+### 6.3 Recursion limit
 
 Recursion is bounded to 2048 nested calls. Beyond that the evaluator raises:
 
@@ -1511,11 +1540,10 @@ Arrays become `[a b c]`. Structs become `{key: value ...}` in insertion order.
 
 A function is written as its own definition, `(fn (parameters) body)`, so a
 function can be copied out of a session and pasted into another one. The name a
-`let` gave it is not part of this text. `fn` takes only a `()` parameter list
-and rejects a name written in front of it with
-`TypeError: fn parameters must use ()`, so a name has nowhere to be written and
-the copy is anonymous. A native function is written as the module path the reader
-can follow, `str.upper._`, which needs the same `use` in the scope it is read in.
+`let` gave it is not part of this text, because the parameter list of `fn` has
+nowhere to put a name (Section 6.1), so the copy is anonymous. A native function
+is written as the module path the reader can follow, `str.upper._`, which needs
+the same `use` in the scope it is read in.
 
 A function value carries its body but not the bindings its body closed over, so
 those names are not in the text. The text is still valid and reads back, but the
@@ -2374,18 +2402,22 @@ is auditable. Each item was verified against the interpreter.
    give `TypeError: reserved name cannot be bound`.
 5. `expect` and `and`, `or`, `not` were not specified at all. Sections 11.3 to
    11.6 here are new.
-6. The immediate-call form of `fn` was not specified at all. Section 6.1 here is
+6. The immediate-call form of `fn` was not specified at all. Section 6.2 here is
    new.
-7. The rule that access paths must be rooted at a variable was not specified.
+7. The parameter list of `fn` must be parenthesised, and no name may be written
+   in front of it. spec.txt gives every `fn` example with a `()` parameter list
+   but never says the parentheses are required, and never says a function cannot
+   be given a name where it is defined. Section 6.1 here is new.
+8. The rule that access paths must be rooted at a variable was not specified.
    Section 3.1 here is new.
-8. Specifier list. `%h` fixed widths exist, `%o` fixed widths do not, and `%f`
+9. Specifier list. `%h` fixed widths exist, `%o` fixed widths do not, and `%f`
    has no width or precision. The doubled `FormatError:` prefix on some messages
    is documented in Section 15.11.
-9. Ctrl-C in a REPL session. spec.txt section 20 says it cancels the current
+10. Ctrl-C in a REPL session. spec.txt section 20 says it cancels the current
    line. It cannot: the terminal discards that line itself, and the interpreter
    was discarding the next one as well, so the result was never echoed. Section
    20.10 here gives the three positions that do exist.
-10. Ctrl-C outside a REPL session. spec.txt section 18 says it becomes
+11. Ctrl-C outside a REPL session. spec.txt section 18 says it becomes
     `Interrupted`, ending the run. It opens a session at the point it
     interrupted instead, so a program that will not finish can be inspected,
     corrected and resumed, and is ended with `:q`. `Interrupted` is now only the

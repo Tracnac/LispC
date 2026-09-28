@@ -398,6 +398,75 @@ fn binding_form_and_builtin_names_is_rejected() {
     ));
 }
 
+/// The parameter list of `fn` is parenthesised, and the parentheses are
+/// mandatory: there is no way to write a name in front of the list, so a
+/// function has no name of its own in the source.
+#[test]
+fn fn_parameter_list_must_use_parentheses() {
+    for src in ["(fn (a) a)", "(fn (a b) (add a b))", "(fn () 7)"] {
+        assert!(
+            matches!(run(src), Ok(value) if value_type(&value) == "function"),
+            "{src} should build a function"
+        );
+    }
+    for src in [
+        "(fn hlp (y) y)",
+        "(fn 1 (y) y)",
+        "(fn 1.5 (y) y)",
+        "(fn t (y) y)",
+        "(fn _ (y) y)",
+        "(fn [1] (y) y)",
+        "(fn \"s\" (y) y)",
+        "(fn {a: 1} (y) y)",
+    ] {
+        assert!(
+            matches!(run(src), Err(Error::Type(message)) if message == "fn parameters must use ()"),
+            "{src} should be refused, the parameter list must use ()"
+        );
+    }
+    // Fewer than a parameter list and a body is an arity error, reported
+    // before the shape of the parameter list is looked at.
+    for src in ["(fn)", "(fn (a))"] {
+        assert!(
+            matches!(run(src), Err(Error::Arity(message)) if message == "fn expects parameters and body"),
+            "{src} should be short of the body"
+        );
+    }
+}
+
+/// Every entry inside the parentheses must be a name. A name that reads as a
+/// literal is not a name, so it takes the identifier error rather than the
+/// reserved-name one of Section 2.2.
+#[test]
+fn fn_parameters_must_be_names() {
+    for src in [
+        "(fn (1) 1)",
+        "(fn (a 1) a)",
+        "(fn (\"s\") 1)",
+        "(fn ((a)) 1)",
+        "(fn (a [b]) a)",
+    ] {
+        assert!(
+            matches!(run(src), Err(Error::Type(message)) if message == "function parameter must be identifier"),
+            "{src} should be refused, a parameter must be a name"
+        );
+    }
+    // `t`, `f` and `_` read as literals, so they are not names at all.
+    for src in ["(fn (t) t)", "(fn (f) f)", "(fn (_) 1)"] {
+        assert!(
+            matches!(run(src), Err(Error::Type(message)) if message == "function parameter must be identifier"),
+            "{src} should be refused, a literal is not a name"
+        );
+    }
+    // A special form or built-in name is a name, so it takes the other error.
+    for src in ["(fn (let) 1)", "(fn (x add) 1)"] {
+        assert!(
+            matches!(run(src), Err(Error::Type(message)) if message.contains("reserved name cannot be used as a parameter")),
+            "{src} should be refused, a reserved name is not allowed as a parameter"
+        );
+    }
+}
+
 #[test]
 fn repeated_let_in_loop_scope_is_a_duplicate_error() {
     assert!(matches!(
