@@ -6,7 +6,7 @@ use std::{
     fs::{self},
     io::{self, BufRead, BufReader, Read, Write},
     rc::Rc,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     thread,
 };
 use unicode_segmentation::UnicodeSegmentation;
@@ -58,6 +58,7 @@ enum IndexSpec {
 }
 #[derive(Clone)]
 struct Function {
+    id: u64,
     params: Vec<String>,
     body: Expr,
     env: EnvRef,
@@ -178,6 +179,12 @@ enum Flow {
 /// is a normal RecursionError (with the call site and live call chain), not
 /// a stack-overflow abort. See spec.txt §fn and main().
 const MAX_CALL_DEPTH: usize = 2048;
+static NEXT_FUNCTION_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_function_id() -> u64 {
+    NEXT_FUNCTION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Native stack reserved for the interpreter thread (see MAX_CALL_DEPTH and
 /// main()). Only the pages actually touched are committed.
 const INTERPRETER_STACK: usize = 256 * 1024 * 1024;
@@ -2356,6 +2363,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, call_span: Span) -> 
                     .into());
                 }
                 let fun = Value::Function(Rc::new(Function {
+                    id: next_function_id(),
                     params: ps,
                     body: args[1].clone(),
                     env: env.clone(),
@@ -2464,8 +2472,8 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, call_span: Span) -> 
                 };
                 return Err(Error::Expect(format!(
                     "{comment}: expected {}, got {}",
-                    debug_render(&expected),
-                    debug_render(&actual)
+                    expect_debug_render(&expected),
+                    expect_debug_render(&actual)
                 ))
                 .into());
             }
@@ -3345,10 +3353,27 @@ fn debug_render(v: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        Value::Function(function) => format!("Function({})", function.params.join(", ")),
+        Value::Function(function) => {
+            format!("Function#{}({})", function.id, function.params.join(", "))
+        }
         Value::NativeFunction(function) => format!("NativeFunction({})", function.name),
     }
 }
+
+fn expect_debug_render(value: &Value) -> String {
+    if let Value::Struct(fields) = value {
+        let has_spec = fields.iter().any(|(key, _)| key == "spec");
+        if has_spec {
+            if let Some((_, callable @ (Value::Function(_) | Value::NativeFunction(_)))) =
+                fields.iter().find(|(key, _)| key == "_")
+            {
+                return debug_render(callable);
+            }
+        }
+    }
+    debug_render(value)
+}
+
 fn numeric(v: Value) -> Result<(Option<i64>, f64), Flow> {
     match v {
         Value::Int(n) => Ok((Some(n), n as f64)),

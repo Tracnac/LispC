@@ -1205,12 +1205,18 @@ With two arguments the message is
 message starts with the given string. The third argument must be a string.
 Exactly two or three arguments are accepted, anything else is an `ArityError:
 expect expects 2 or 3 arguments, got N`. Both values in the message use the
-debug form of Section 15.9.
+debug form of Section 15.9. A callable module descriptor is summarized by the
+debug form of its callable member, rather than including the descriptor's
+documentation and specification metadata.
 
 ```
 (expect 1 2)                 ; ExpectationError: expectation failed: expected Int(2), got Int(1)
 (expect [1] [2] "differ")    ; ExpectationError: differ: expected Array([Int(2)]), got Array([Int(1)])
+(use "io") (expect io.write (fn (x) x))
+                              ; ExpectationError: expectation failed: expected Function#N(x), got NativeFunction(io.write)
 ```
+
+Here `N` stands for the opaque process-local function identity marker.
 
 ---
 
@@ -1679,11 +1685,14 @@ truthiness.
 ```
 Int(1)  Float(1.5)  Str("a")  Bool(true)  Null
 Array([Int(1)])  Struct({name: Int(1)})
-Function(b, c)  NativeFunction(io.write)  Ref(Int(1))
+Function#42(b, c)  NativeFunction(io.write)  Ref(Int(1))
 ```
 
 Struct keys follow Lisp syntax, `name: value`, without quotes. A function shows
-its parameter list, not its binding name. A reference appears as `Ref(...)` with
+an opaque process-local numeric identity marker and its parameter list, not its
+binding name. The marker is stable for the lifetime of that closure and
+distinct for separately created closures; its exact numeric value and ordering
+are not part of the language semantics. A reference appears as `Ref(...)` with
 its content rendered by dereferencing the location, and an invalid reference
 becomes `Ref(<invalid>)`. The wrapper is kept, unlike `%s`, `%x` and `%j`, so
 that structures containing cycles stay printable.

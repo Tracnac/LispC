@@ -143,6 +143,7 @@ fn references_are_not_callable() {
         Ok(Value::Ref(_))
     ));
     let function = Value::Function(Rc::new(Function {
+        id: next_function_id(),
         params: vec![],
         body: Expr {
             kind: ExprKind::Lit(Literal::Null),
@@ -1094,13 +1095,45 @@ fn the_expect_message_argument_must_be_a_string() {
 #[test]
 fn expect_compares_functions_by_identity() {
     check(r#"((let a (fn (x) x)) (expect a a))"#, r#"t"#);
-    // Two closures built from identical source are distinct values, so this
-    // fails. The message is deliberately not asserted: the debug form renders
-    // two distinct functions identically, which is the open item in the todo.
-    assert!(matches!(
-        run(r#"((let a (fn (x) x)) (let b (fn (x) x)) (expect a b))"#),
-        Err(Error::Expect(_))
-    ));
+    let message = match run(r#"((let a (fn (x) x)) (let b (fn (x) x)) (expect a b))"#) {
+        Err(Error::Expect(message)) => message,
+        Err(error) => panic!("expected an expectation failure, got {error}"),
+        Ok(_) => panic!("expected distinct closures to fail expect"),
+    };
+    let (expected, actual) = message
+        .strip_prefix("expectation failed: expected ")
+        .unwrap()
+        .split_once(", got ")
+        .unwrap();
+    let expected_id = expected
+        .strip_prefix("Function#")
+        .unwrap()
+        .split_once('(')
+        .unwrap()
+        .0;
+    let actual_id = actual
+        .strip_prefix("Function#")
+        .unwrap()
+        .split_once('(')
+        .unwrap()
+        .0;
+    assert_ne!(expected_id, actual_id);
+    assert!(expected.ends_with("(x)") && actual.ends_with("(x)"));
+}
+
+#[test]
+fn expect_summarizes_module_descriptors_without_changing_struct_debug_output() {
+    let message = match run(r#"(use "io") (expect io.write (fn (x) x))"#) {
+        Err(Error::Expect(message)) => message,
+        Err(error) => panic!("expected an expectation failure, got {error}"),
+        Ok(_) => panic!("expected descriptor/function mismatch"),
+    };
+    assert!(
+        message.contains("got NativeFunction(io.write)"),
+        "{message}"
+    );
+    assert!(!message.contains("documentation"), "{message}");
+    assert!(!message.contains("spec"), "{message}");
 }
 
 #[test]

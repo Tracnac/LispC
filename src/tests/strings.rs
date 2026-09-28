@@ -79,6 +79,37 @@ fn formatting_supports_integer_bases_json_and_debug_output() {
 }
 
 #[test]
+fn debug_function_identity_is_stable_for_aliases_and_distinct_for_new_closures() {
+    let output = run(r#"(let clos (fn (x) x)) (let same clos) ($ "%v %v" clos same)"#).unwrap();
+    let Value::Str(output) = output else {
+        panic!("expected debug output string");
+    };
+    let (first, second) = output.split_once(' ').unwrap();
+    assert_eq!(first, second, "an alias must keep its closure's identity");
+    assert!(
+        first.starts_with("Function#") && first.ends_with("(x)"),
+        "{first}"
+    );
+
+    let other = run(r#"(fn (x) x)"#).unwrap();
+    let Value::Function(other) = other else {
+        panic!("expected a function");
+    };
+    assert_ne!(first, debug_render(&Value::Function(other)));
+}
+
+#[test]
+fn debug_render_keeps_module_descriptors_structural() {
+    let Value::Str(output) = run(r#"(use "io") ($ "%v" io.write)"#).unwrap() else {
+        panic!("expected debug output string");
+    };
+    assert_eq!(
+        output,
+        r#"Struct({_: NativeFunction(io.write), spec: Struct({documentation: Str("Write a string to a file descriptor."), arity: Int(2), type: Array([Str("int"), Str("string")]), return: Array([Str("int")])})})"#
+    );
+}
+
+#[test]
 fn formatting_percent_q_quotes_strings_as_lisp_literals() {
     // %s inserts the raw contents; %q wraps them in a parseable Lisp literal.
     let value = run(r#"($ "%s|%q" "hello" "hello")"#).unwrap();
