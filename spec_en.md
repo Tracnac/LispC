@@ -219,9 +219,22 @@ An unterminated string is a `ParseError`.
 - Struct keys must be a single unquoted name. `{"a": 1}` is a `ParseError`, and so
   is `{1: 2}` and `{a b: 1}`. A duplicate key is a `DuplicateKeyError`. Insertion
   order is preserved. A key may use any name characters, so `{a/b: 1}` is fine.
-- Commas are optional whitespace inside `[]` and `{}`. `[1, 2]`, `[1 2]` and
-  `[1,,2]` are the same array. In fact `,` is whitespace everywhere in the
-  language, not only inside brackets.
+- A comma may optionally separate two adjacent elements of `[]`, or two
+  adjacent fields of `{}`. It is a separator, not whitespace, so at most one
+  comma stands between two adjacent items, and a comma after the last item is
+  allowed, which is what lets a literal be written one item per line. `[1, 2]`,
+  `[1,2]` and `[1 2]` are the same array, and so are `{a: 1, b: 2}` and
+  `{a: 1 b: 2}`.
+- A comma that does not separate two adjacent items is a `ParseError`, so
+  `[,1]` and `[1,,2]` are a `ParseError: unexpected comma in array`, and
+  `{,a: 1}` and `{a: 1,,b: 2}` are a `ParseError: unexpected comma in struct`.
+- A comma may not occur anywhere else in the language, because nothing else
+  looks for a separator. `(add 1, 2)`, `(if, t 1 2)`, `(let x, 1)` and
+  `{a: (add 1,2)}` are each a `ParseError: unexpected token Comma`, and so is a
+  comma in an index selector, as in `a[1,]`.
+- A comma inside a string is data, not a separator, because a string is one
+  token. `"a,b"` is those three characters, and `["a,b" "c,d"]` is an array of
+  two elements.
 
 A slice or a multi-select must be the last step of a postfix chain, because
 neither can be a location on a path:
@@ -625,7 +638,9 @@ selector      := form | form ".." form | "[" form* "]"
   `((fn (x) x) 2)` are all blocks that evaluate every form and return the last
   one, here `2`.
 - A block creates a new scope and returns the value of its last form.
-- `,` is whitespace everywhere, so `[1, 2]` and `[1 2]` are the same array.
+- `,` is a separator, not whitespace, and it is only one inside `[]` and `{}`,
+  between two adjacent items, so `[1, 2]` and `[1 2]` are the same array. See
+  Section 1.3.
 - `;` starts a comment that runs to the end of the line. One `;` is enough.
 
 ### 3.1 Access paths must start at a variable

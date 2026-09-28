@@ -330,6 +330,7 @@ enum TokKind {
     RBrack,
     LBrace,
     RBrace,
+    Comma,
     Colon,
     DotDot,
     Dot,
@@ -444,7 +445,7 @@ fn lex_tokens(src: &str, at: &mut usize) -> Result<Vec<Tok>, Error> {
         let c = cs[i];
         let token_start = i;
         *at = token_start;
-        if c.is_whitespace() || c == ',' {
+        if c.is_whitespace() {
             i += 1;
             continue;
         }
@@ -461,6 +462,7 @@ fn lex_tokens(src: &str, at: &mut usize) -> Result<Vec<Tok>, Error> {
             ']' => Some(TokKind::RBrack),
             '{' => Some(TokKind::LBrace),
             '}' => Some(TokKind::RBrace),
+            ',' => Some(TokKind::Comma),
             ':' => Some(TokKind::Colon),
             '.' if cs.get(i + 1) == Some(&'.') => {
                 i += 1;
@@ -706,10 +708,15 @@ impl Parser {
             TokKind::LBrack => {
                 let mut v = vec![];
                 while self.peek().map(|t| &t.kind) != Some(&TokKind::RBrack) {
-                    if self.peek().is_none() {
-                        return Err(Error::Parse("unclosed array".into()));
+                    match self.peek() {
+                        None => return Err(Error::Parse("unclosed array".into())),
+                        Some(t) if t.kind == TokKind::Comma => {
+                            return Err(Error::Parse("unexpected comma in array".into()))
+                        }
+                        _ => {}
                     }
-                    v.push(self.form()?)
+                    v.push(self.form()?);
+                    self.separator_comma();
                 }
                 let end = self.take().unwrap().span.end;
                 Expr {
@@ -875,9 +882,24 @@ impl Parser {
             }
         }
     }
+    /// The comma that may sit between two adjacent items of an array or a
+    /// struct. It is a separator, not whitespace: it is consumed only here, so
+    /// the same character in any other position is a `Comma` token the reader
+    /// rejects. At most one comma separates two items, and one after the last
+    /// item is allowed, so a literal may be written one item per line. A comma
+    /// in front of the first item is rejected by the caller, which wants an
+    /// item there and not a separator.
+    fn separator_comma(&mut self) {
+        if self.peek().map(|t| &t.kind) == Some(&TokKind::Comma) {
+            self.take();
+        }
+    }
     fn struct_(&mut self, start: usize) -> Result<Expr, Error> {
         let mut v = vec![];
         while self.peek().map(|t| &t.kind) != Some(&TokKind::RBrace) {
+            if self.peek().map(|t| &t.kind) == Some(&TokKind::Comma) {
+                return Err(Error::Parse("unexpected comma in struct".into()));
+            }
             let key = match self.take() {
                 Some(Tok {
                     kind: TokKind::Symbol(x),
@@ -894,6 +916,7 @@ impl Parser {
                 value: val,
                 span: key.1,
             });
+            self.separator_comma();
         }
         let end = self.take().unwrap().span.end;
         Ok(Expr {

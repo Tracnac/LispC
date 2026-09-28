@@ -18,6 +18,133 @@ fn fully_open_slice_of_empty_array_is_empty() {
     check("(let a []) (let b a[..]) b", "[]");
 }
 
+/// A comma separates two adjacent elements. It is not whitespace, so a
+/// literal is written either with spaces or with commas between the elements,
+/// and the two forms mean the same array.
+#[test]
+fn a_comma_separates_adjacent_array_elements() {
+    check("[1,2]", "[1 2]");
+    check("[1, 2, 3]", "[1 2 3]");
+    check("[1,2,3]", "[1 2 3]");
+    check("[[1,2],[3,4]]", "[[1 2] [3 4]]");
+    check("[1,2,]", "[1 2]");
+}
+
+/// The same rule for the fields of a struct, with the same trailing comma
+/// allowed so a literal may be written one field per line.
+#[test]
+fn a_comma_separates_adjacent_struct_fields() {
+    check("{a:1,b:2}", "{a:1 b:2}");
+    check("{a:1, b:2,}", "{a:1 b:2}");
+    check("{a:[1,2], b:{c:3}}", "{a:[1 2] b:{c:3}}");
+}
+
+/// A comma after the last element separates nothing, but it is allowed,
+/// because it is what makes a one-element-per-line literal writable.
+#[test]
+fn a_trailing_comma_is_allowed() {
+    check("[1,]", "[1]");
+    check("[1,2,]", "[1 2]");
+    check("{a:1,}", "{a:1}");
+}
+
+/// At most one comma separates two elements. A second one in the same gap
+/// separates an element from an element that is not there, so it is an error,
+/// and so is a comma in front of the first element, for the same reason.
+#[test]
+fn a_second_comma_in_one_gap_is_rejected() {
+    for src in ["[1,,2]", "[1,,,2]", "[1,,]"] {
+        assert!(
+            matches!(run(src), Err(Error::Parse(message)) if message == "unexpected comma in array"),
+            "{src} should be rejected, and one comma in each gap is not enough"
+        );
+    }
+    for src in ["{a:1,,b:2}", "{a:1,,,b:2}", "{a:1,,}"] {
+        assert!(
+            matches!(run(src), Err(Error::Parse(message)) if message == "unexpected comma in struct"),
+            "{src} should be rejected, and one comma between fields is enough"
+        );
+    }
+}
+
+#[test]
+fn a_leading_comma_is_rejected() {
+    for src in ["[,1]", "[,]", "[,,1]"] {
+        assert!(
+            matches!(run(src), Err(Error::Parse(message)) if message == "unexpected comma in array"),
+            "{src} should be rejected, a comma in front of the first element separates nothing"
+        );
+    }
+    for src in ["{,a:1}", "{,}"] {
+        assert!(
+            matches!(run(src), Err(Error::Parse(message)) if message == "unexpected comma in struct"),
+            "{src} should be rejected, a comma in front of the first field separates nothing"
+        );
+    }
+}
+
+/// A comma is a separator, not whitespace, so it may not occur anywhere the
+/// reader is not looking for one between two adjacent items. A call, a
+/// parameter list and a special form all take their items by position.
+#[test]
+fn a_comma_outside_brackets_is_rejected() {
+    for src in [
+        "(add 1, 2)",
+        "(add, 1 2)",
+        "(add (mul,2 3) 1)",
+        "(if, t 1 2)",
+        "(let x, 1)",
+        "((fn, (x) x) 5)",
+        "(do, 1 2)",
+        "{a:(add 1,2)}",
+    ] {
+        assert!(
+            matches!(run(src), Err(Error::Parse(message)) if message == "unexpected token Comma"),
+            "{src} should be rejected, a comma only separates elements of [] and {{}}"
+        );
+    }
+}
+
+/// Inside brackets only, a comma between two elements. A selector is not a
+/// literal element list, so a comma there is a comma in the wrong place.
+#[test]
+fn a_comma_in_a_selector_is_rejected() {
+    assert!(matches!(
+        run("(let a [9 8 7]) a[1,]"),
+        Err(Error::Parse(message)) if message == "expected ] after index selector"
+    ));
+    assert!(matches!(
+        run("(let a [9 8 7]) a[1..2,]"),
+        Err(Error::Parse(message)) if message == "expected ] after index selector"
+    ));
+    assert!(matches!(
+        run("(let a [9 8 7]) a[,1]"),
+        Err(Error::Parse(message)) if message == "unexpected token Comma"
+    ));
+    // A multi-select is written with its own brackets, so the comma is between
+    // two elements of a real array literal and is fine.
+    check("(let a [9 8 7]) a[[1,3]]", "[9 7]");
+}
+
+/// A comma inside a string is data, because a string is lexed as one token,
+/// so it neither separates two elements nor disappears.
+#[test]
+fn a_comma_in_a_string_is_data() {
+    check(r#"["a,b"]"#, r#"["a,b"]"#);
+    check(r#""a,b""#, r#""a,b""#);
+    check(r#"["a,b" "c,d"]"#, r#"["a,b" "c,d"]"#);
+    check(r#"($ "%s" "a,b")"#, r#""a,b""#);
+}
+
+/// Without a comma the reader is unchanged, and a value never grows one, so
+/// the canonical text of a literal read with commas reads back unchanged.
+#[test]
+fn a_comma_is_never_written_back() {
+    check(r#"($ "%x" [1, 2, 3])"#, r#""[1 2 3]""#);
+    check(r#"($ "%x" {a: 1, b: 2})"#, r#""{a:1 b:2}""#);
+    check(r#"($ "%x" [[1, 2]])"#, r#""[[1 2]]""#);
+}
+
 #[test]
 fn array_dot_access_is_rejected() {
     assert!(matches!(
