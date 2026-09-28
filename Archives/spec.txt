@@ -37,7 +37,7 @@ Les symboles `t`, `f`, `_`, `NaN`, `+NaN`, `Inf`, `+Inf` et `-Inf` sont des litt
   `le`, `ge`, `bit-and`, `bit-or`, `bit-xor`, `bit-not`, `bit-shl` et `bit-shr`. Leurs
   arguments sont évalués puis l'opération est appliquée selon les règles d'arité de §6 et de
   typage de §8–§10.
-* Le builtin d'interaction est `$`, qui effectue l'interpolation décrite en §14 et inclut la
+* Le builtin d'interaction est `fmt`, qui effectue l'interpolation décrite en §14 et inclut la
   correspondance regex via `%~` (moteur et captures décrits en §15). Le module natif `io`
   expose `io.open`, `io.read`, `io.write` et `io.close` après `(use "io")` ; le module natif
   `http` expose `http.get`, `http.post`, `http.put`, `http.patch`, `http.delete` et
@@ -174,12 +174,12 @@ postfix-access := field-access ("[" selector "]")*
 (let n (^ user.name))
 (set n "Nouveau")
 (use "io")
-(io.write 1 ($ "%s" user.name))   ; "Nouveau"
+(io.write 1 (fmt "%s" user.name))   ; "Nouveau"
 
 (let nums [1 2 3])
 (let push-zero (fn (a) (set a[1] 0)))
 (push-zero ^nums)
-(io.write 1 ($ "%d" nums[1]))      ; 0 (mutation en place du tableau)
+(io.write 1 (fmt "%d" nums[1]))      ; 0 (mutation en place du tableau)
 * eq déréférence transparemment : comparer une référence à une valeur compare les valeurs pointées, pas des adresses (le langage n'expose aucune notion d'identité de pointeur ailleurs).
 * Modèle de valeurs : les arrays et structs sont des instantanés immuables partagés en lecture.
   Toute lecture (accès par valeur, argument, let) renvoie la valeur courante sans offrir de vue
@@ -231,11 +231,11 @@ Contexte	Règle
 Arithmétique	int+int→int, float+float→float, int+float→float (promotion). div : int+int→int avec troncature vers zéro, sinon float. Autres types → TypeError.
 eq/ne	Comparaison numérique cross-type autorisée (5 == 5.0 → t). Types non numériques différents → f (jamais d'erreur).
 lt/gt/le/ge	Numérique uniquement, même règles de promotion que l'arithmétique. Types non numériques → TypeError.
-$ (%s)	Accepte tout type, stringification canonique (les clés de struct ne sont pas entourées de guillemets).
-$ (%d/%f)	%d exige un integer, %f accepte float ou integer (integer rendu exactement, sans promotion Float).
-$ (%b/%h/%o)	Formats binaire, hexadécimal et octal ; `%8b`, `%16b`, `%32b` et `%64b`
+fmt (%s)	Accepte tout type, stringification canonique (les clés de struct ne sont pas entourées de guillemets).
+fmt (%d/%f)	%d exige un integer, %f accepte float ou integer (integer rendu exactement, sans promotion Float).
+fmt (%b/%h/%o)	Formats binaire, hexadécimal et octal ; `%8b`, `%16b`, `%32b` et `%64b`
 		sont les formats binaires à largeur fixe.
-$ (%j/%t/%v)	JSON, nom du type et représentation structurelle de debug.
+fmt (%j/%t/%v)	JSON, nom du type et représentation structurelle de debug.
 Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 
 10. eq par type
@@ -305,8 +305,8 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
   finis) produit FormatError ; les erreurs d'URL, de transport, de statut HTTP 4xx/5xx, de
   lecture de réponse et de décodage JSON produisent HTTPError.
 
-14. Interpolation $
-* Syntaxe : `($ format arguments...)`. Le premier argument doit être une string ; les arguments
+14. Interpolation fmt
+* Syntaxe : `(fmt format arguments...)`. Le premier argument doit être une string ; les arguments
   suivants sont consommés dans l'ordre par les spécificateurs.
 * `%s` accepte tout type et produit la stringification canonique. Les strings utilisées comme
   valeurs imbriquées dans les arrays et structs sont entourées de guillemets ; les clés de struct
@@ -315,7 +315,7 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
 * `%q` exige une string et produit un littéral string Lisp entre guillemets, ré-utilisable par le
   lecteur : `"` → `\"`, `\` → `\\`, saut de ligne → `\n`, retour chariot → `\r`, tabulation →
   `\t` ; tout autre caractère est émis tel quel (le lecteur l'accepte verbatim). Le résultat
-  re-parse comme la même string (`($ "%q" "hi\n")` → `"hi\n"`). Les références sont déréférencées.
+  re-parse comme la même string (`(fmt "%q" "hi\n")` → `"hi\n"`). Les références sont déréférencées.
 * `%x` sérialise n'importe quelle valeur en source Lisp canonique, ré-utilisable par le lecteur :
   les strings imbriquées utilisent les règles d'échappement ci-dessus, les booléens deviennent
   `t`/`f`, `_` devient `_`, les floats utilisent leur représentation numérique (`NaN`, `Inf`,
@@ -376,10 +376,10 @@ Prédicats (if/loop/and/or/not)	Voir §1 truthiness.
   d'arguments restants → `FormatArityError` sinon.
 * Un type incompatible avec `%d`, `%b`, `%h`, `%o`, `%f` ou `%j` produit une `FormatError`
   avec un sous-message `FormatTypeError`.
-* Le résultat de `$` est toujours une string.
+* Le résultat de `fmt` est toujours une string.
 
 15. Regex
-* La correspondance regex s'utilise uniquement via l'interpolation `$` : le spécificateur `%~`
+* La correspondance regex s'utilise uniquement via l'interpolation `fmt` : le spécificateur `%~`
   (§14) applique une regex à une string et calcule la liste des correspondances ; les
   sélecteurs `%M.C` et `%N` émettent la correspondance complète et les groupes capturants.
 * Les regex utilisent le moteur Rust `regex` et opèrent sur des strings UTF-8. Pour chaque

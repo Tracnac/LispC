@@ -184,16 +184,16 @@ fn a_comma_in_a_string_is_data() {
     check(r#"["a,b"]"#, r#"["a,b"]"#);
     check(r#""a,b""#, r#""a,b""#);
     check(r#"["a,b" "c,d"]"#, r#"["a,b" "c,d"]"#);
-    check(r#"($ "%s" "a,b")"#, r#""a,b""#);
+    check(r#"(fmt "%s" "a,b")"#, r#""a,b""#);
 }
 
 /// Without a comma the reader is unchanged, and a value never grows one, so
 /// the canonical text of a literal read with commas reads back unchanged.
 #[test]
 fn a_comma_is_never_written_back() {
-    check(r#"($ "%x" [1, 2, 3])"#, r#""[1 2 3]""#);
-    check(r#"($ "%x" {a: 1, b: 2})"#, r#""{a:1 b:2}""#);
-    check(r#"($ "%x" [[1, 2]])"#, r#""[[1 2]]""#);
+    check(r#"(fmt "%x" [1, 2, 3])"#, r#""[1 2 3]""#);
+    check(r#"(fmt "%x" {a: 1, b: 2})"#, r#""{a:1 b:2}""#);
+    check(r#"(fmt "%x" [[1, 2]])"#, r#""[[1 2]]""#);
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn structs_unwrap_the_underscore_field_only_in_operator_position() {
         "42",
     );
     check(
-        "(let module {open: {_: (fn () 42) spec: {documentation:\"open\" arity: 0 type: _ return: []}}}) ($ \"%s\" module.open)",
+        "(let module {open: {_: (fn () 42) spec: {documentation:\"open\" arity: 0 type: _ return: []}}}) (fmt \"%s\" module.open)",
         r#""{_:<fn> spec:{documentation:\"open\" arity:0 type: return:[]}}""#,
     );
 }

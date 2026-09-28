@@ -152,22 +152,22 @@ fn sub_subtracts_all_operands() {
 
 #[test]
 fn div_with_single_operand_returns_reciprocal() {
-    check(r#"($ "%t:%s" (div 10) (div 10))"#, r#""float:0.1""#);
+    check(r#"(fmt "%t:%s" (div 10) (div 10))"#, r#""float:0.1""#);
 }
 
 #[test]
 fn div_with_single_float_operand_returns_reciprocal() {
-    check(r#"($ "%t:%s" (div 2.5) (div 2.5))"#, r#""float:0.4""#);
+    check(r#"(fmt "%t:%s" (div 2.5) (div 2.5))"#, r#""float:0.4""#);
 }
 
 #[test]
 fn div_divides_first_by_second() {
-    check(r#"($ "%t:%s" (div 10 2) (div 10 2))"#, r#""int:5""#);
+    check(r#"(fmt "%t:%s" (div 10 2) (div 10 2))"#, r#""int:5""#);
 }
 
 #[test]
 fn div_folds_left_to_right() {
-    check(r#"($ "%t:%s" (div 10 2 5) (div 10 2 5))"#, r#""int:1""#);
+    check(r#"(fmt "%t:%s" (div 10 2 5) (div 10 2 5))"#, r#""int:1""#);
 }
 
 #[test]

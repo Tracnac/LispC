@@ -9,7 +9,7 @@
 
 ; Regex matching can validate a non-empty answer: a match emits the name, no match emits "f".
 (match
-  (ne ($ "%~%1" "^(.+)$" name) "f")
+  (ne (fmt "%~%1" "^(.+)$" name) "f")
   (
     (let profile {name:name visits:0 roles:["reader" "writer"]})
 
@@ -18,19 +18,19 @@
     (register-visit ^profile.visits)
 
     (let greeting (fn (person)
-      ($ "Welcome, %s. This is visit #%d.\n" person.name person.visits)))
+      (fmt "Welcome, %s. This is visit #%d.\n" person.name person.visits)))
 
     (io.write 1 (greeting profile))
-    (io.write 1 ($ "Default role: %s\n" profile.roles[1]))
+    (io.write 1 (fmt "Default role: %s\n" profile.roles[1]))
 
     ; A loop can return a value through break.
     (let seconds 3)
     (let status
       (loop
         (if (eq seconds 0) (break "ready"))
-        ((io.write 1 ($ "Starting in %d...\n" seconds))
+        ((io.write 1 (fmt "Starting in %d...\n" seconds))
          (set seconds (sub seconds 1)))))
-    (io.write 1 ($ "Service status: %s\n" status))
+    (io.write 1 (fmt "Service status: %s\n" status))
   )
   t
   (io.write 1 "A name is required; please run the program again.\n")

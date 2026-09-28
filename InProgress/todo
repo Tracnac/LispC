@@ -91,7 +91,7 @@ Recorded so the next reader knows these were re-checked rather than overlooked.
   branch, the `/dev/tty` routing extracted as `ReplSink`, and the doubled-prefix test.
 - Drift.md F5-F10 and F12 are now covered, by fourteen tests added in one pass. F12 turned out
   to be stale rather than open: `format_errors_point_at_the_dollar_call` already asserts a
-  rendered caret for a `$` error. The rest were genuinely untested, and the audit understated
+  rendered caret for a `fmt` error. The rest were genuinely untested, and the audit understated
   two of them. `expect` had *no* test at all, not just no arity test — `ExpectationError` had
   zero occurrences in the suite — so its success path, its two failure-message shapes from
   spec_en.md:1185-1187, its arity error, its string-only third argument and its function

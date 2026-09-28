@@ -174,7 +174,7 @@ fn reading_a_bound_alias_derefs_to_the_current_value() {
     // reading it inside the callee derefs to a value.
     check("(let a [1 2]) (let g (fn (x) x)) (eq (g (^ a)) [1 2])", "t");
     // The ref type tag is preserved on freshly built alias expressions.
-    check(r#"(let a [1 2]) ($ "%t" (^ a[1]))"#, r#""ref""#);
+    check(r#"(let a [1 2]) (fmt "%t" (^ a[1]))"#, r#""ref""#);
 }
 
 // -- 4. Root replaced with an incompatible value ------------------------------
@@ -332,39 +332,39 @@ fn equality_follows_aliases_to_the_current_value() {
 fn rendering_and_serializers_read_aliases_live() {
     // %s renders the current value through the alias.
     check(
-        r#"(let a [1 2]) (let p (^ a[1])) (set a[1] 9) ($ "%s" p)"#,
+        r#"(let a [1 2]) (let p (^ a[1])) (set a[1] 9) (fmt "%s" p)"#,
         r#""9""#,
     );
     // %x serializes composites with refs deref'd inline.
     check(
-        r#"(let b [3 4]) (let a [1 (^ b)]) ($ "%x" a)"#,
+        r#"(let b [3 4]) (let a [1 (^ b)]) (fmt "%x" a)"#,
         r#""[1 [3 4]]""#,
     );
     // %j encodes nested composites with refs.
     check(
-        r#"(let b [3 4]) (let a {m: (^ b)}) ($ "%j" a)"#,
+        r#"(let b [3 4]) (let a {m: (^ b)}) (fmt "%j" a)"#,
         r#""{\"m\":[3,4]}""#,
     );
     // %q quotes strings through an alias.
-    check(r#"(let s "hi") (let p (^ s)) ($ "%q" p)"#, r#""\"hi\"""#);
+    check(r#"(let s "hi") (let p (^ s)) (fmt "%q" p)"#, r#""\"hi\"""#);
     // %v debug-renders composites; the Ref wrapper is kept visible (recursive
     // structures stay renderable), unlike %s/%x/%j which deref.
     check(
-        r#"(let b [3 4]) (let a {m: (^ b)}) ($ "%v" a)"#,
+        r#"(let b [3 4]) (let a {m: (^ b)}) (fmt "%v" a)"#,
         r#""Struct({m: Ref(Array([Int(3), Int(4)]))})""#,
     );
     // An infallible renderer degrades a stale ref to a placeholder...
     check(
-        r#"(let a [1 2]) (let refs [(^ a[1])]) (set a 5) ($ "%s" refs)"#,
+        r#"(let a [1 2]) (let refs [(^ a[1])]) (set a 5) (fmt "%s" refs)"#,
         r#""[null]""#,
     );
     // ...but the fallible serializers propagate the deref failure.
     assert!(matches!(
-        run(r#"(let a [1 2]) (let refs [(^ a[1])]) (set a 5) ($ "%x" refs)"#),
+        run(r#"(let a [1 2]) (let refs [(^ a[1])]) (set a 5) (fmt "%x" refs)"#),
         Err(Error::Type(message)) if message == "indexing requires an array"
     ));
     assert!(matches!(
-        run(r#"(let a [1 2]) (let refs [(^ a[1])]) (set a 5) ($ "%j" refs)"#),
+        run(r#"(let a [1 2]) (let refs [(^ a[1])]) (set a 5) (fmt "%j" refs)"#),
         Err(Error::Type(message)) if message == "indexing requires an array"
     ));
 }

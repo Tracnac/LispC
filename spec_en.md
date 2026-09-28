@@ -281,8 +281,8 @@ The same string illustrates the difference from Section 16: a regex `.` or a
 regex group `(.)` matches only the `e`, because the engine counts scalars.
 
 ```
-($ "%~%1.1" "(e.)" s)   ; the whole cluster e + U+0301, the group spans two scalars
-($ "%~%1.1" "(.)"  s)   ; e only
+(fmt "%~%1.1" "(e.)" s)   ; the whole cluster e + U+0301, the group spans two scalars
+(fmt "%~%1.1" "(.)"  s)   ; e only
 ```
 
 ### 1.5 Truthiness
@@ -381,7 +381,7 @@ characters:
 A run between delimiters that is neither a number (Section 1.1) nor a name is
 rejected: `ParseError: invalid name \`<run>\``. So `1a`, `a/b`, `1_000`, `0X10`
 and a bare `0x` are each a `ParseError: invalid name`, and so is a bare `~`,
-which is only meaningful inside a `$` format string (Section 15). The literal
+which is only meaningful inside a `fmt` format string (Section 15). The literal
 spellings `_`, `+NaN`, `-NaN`, `+Inf` and `-Inf` are the only non-name runs the
 lexer accepts; `t`, `f`, `NaN` and `Inf` are ordinary names as far as the lexer
 is concerned, and the reader maps them to literals.
@@ -416,7 +416,7 @@ These names are special forms and strict built-ins. They cannot be used as a
 
 ```
 let  set  if    fn     loop   break continue match and  or
-not  expect use  eval   $      add   sub  mul  div  mod  pow
+not  expect use  eval   fmt      add   sub  mul  div  mod  pow
 eq   ne   lt    gt     le     ge    bit-and bit-or bit-xor
 bit-not bit-shl bit-shr repl
 ```
@@ -433,7 +433,7 @@ The lexer produces no special token for keywords. They are lexed as ordinary
 names and recognised when they appear at the head of a call:
 
 `let`, `set`, `if`, `fn`, `loop`, `break`, `continue`, `match`, `and`, `or`,
-`not`, `expect`, `use`, `eval`, `repl`, and `$`.
+`not`, `expect`, `use`, `eval`, `repl`, and `fmt`.
 
 These forms control when their arguments are evaluated, so not all arguments are
 necessarily evaluated before the call. `eval` is described in Section 17, `repl`
@@ -456,7 +456,7 @@ Appendix A.
 
 ### 2.5 The interaction built-in
 
-`$` performs interpolation. It is described in Section 15.
+`fmt` performs interpolation. It is described in Section 15.
 
 ### 2.6 Native modules
 
@@ -1060,19 +1060,19 @@ inside a composite:
 
 | Expression | Result |
 | ---------- | ------ |
-| `($ "%s" box)` | `[null]` |
-| `($ "%v" box)` | `Array([Ref(<invalid>)])` |
-| `($ "%x" box)` | `TypeError: indexing requires an array` |
-| `($ "%j" box)` | `TypeError: indexing requires an array` |
+| `(fmt "%s" box)` | `[null]` |
+| `(fmt "%v" box)` | `Array([Ref(<invalid>)])` |
+| `(fmt "%x" box)` | `TypeError: indexing requires an array` |
+| `(fmt "%j" box)` | `TypeError: indexing requires an array` |
 | `(eq box box)` | `f` |
 | `box[1]` | `TypeError: indexing requires an array` |
 
 At the top level a `^` expression yields a reference without dereferencing, so
-`($ "%s" (^ inner[1]))` is `<invalid reference>` while `($ "%t" (^ inner[1]))` is
+`(fmt "%s" (^ inner[1]))` is `<invalid reference>` while `(fmt "%t" (^ inner[1]))` is
 `ref`.
 
 Restoring the location repairs every one of them, because resolution is done at
-each read. `(set inner [9 8])` makes `($ "%s" box)` produce `[9]`.
+each read. `(set inner [9 8])` makes `(fmt "%s" box)` produce `[9]`.
 
 `%v` keeps the `Ref(...)` wrapper, unlike `%s`, `%x` and `%j`, so that
 structures containing cycles stay printable.
@@ -1485,18 +1485,18 @@ returned. A body that cannot be read gives
 ## 15. Interpolation
 
 ```
-($ format arguments...)
+(fmt format arguments...)
 ```
 
 The first argument must be a string, otherwise `TypeError: expected string`. With
-no argument at all the result is `ArityError: $ expects format string`.
+no argument at all the result is `ArityError: fmt expects format string`.
 
 The remaining arguments are consumed in order by the specifiers. The number of
 specifiers that consume an argument must match the number of arguments exactly,
 otherwise the result is `FormatError: FormatArityError`. Passing an argument
 that no specifier consumes is an error.
 
-The result of `$` is always a string.
+The result of `fmt` is always a string.
 
 ### 15.1 Specifiers
 
@@ -1537,11 +1537,11 @@ A type that does not fit `%d`, `%b`, `%h`, `%o`, `%f` or `%j` gives a
 | a function | `<fn>` |
 | a native function | `<native fn>` |
 
-So `($ "%s" "a")` is `a`, `($ "%s" ["a"])` is `["a"]` and `($ "%s" {a: "b"})` is
+So `(fmt "%s" "a")` is `a`, `(fmt "%s" ["a"])` is `["a"]` and `(fmt "%s" {a: "b"})` is
 `{a:"b"}`.
 
 Array elements are separated by one space, and so are struct fields:
-`($ "%s" [1 2])` is `[1 2]` and `($ "%s" {a: 1 b: 2})` is `{a:1 b:2}`.
+`(fmt "%s" [1 2])` is `[1 2]` and `(fmt "%s" {a: 1 b: 2})` is `{a:1 b:2}`.
 
 Booleans are rendered as `true` and `false`, and null as nothing at all, so the
 output of `%s` is not Lisp source and does not read back. Use `%x` for that.
@@ -1556,23 +1556,23 @@ own escapes. Given a string holding the bytes `61 01 62 1f 63`, so a byte below
 the space and a unit separator inside `a` and `bc`:
 
 ```
-($ "%s" s)     ; the raw characters, nothing is escaped
-($ "%s" [s])   ; ["a\u{1}b\u{1F}c"]
-($ "%j" s)     ; "a\u0001b\u001fc"
-($ "%q" s)     ; "a\u{1}b\u{1F}c"
-($ "%x" [s])   ; ["a\u{1}b\u{1F}c"]
-($ "%v" s)     ; Str("a\u{1}b\u{1f}c")
+(fmt "%s" s)     ; the raw characters, nothing is escaped
+(fmt "%s" [s])   ; ["a\u{1}b\u{1F}c"]
+(fmt "%j" s)     ; "a\u0001b\u001fc"
+(fmt "%q" s)     ; "a\u{1}b\u{1F}c"
+(fmt "%x" [s])   ; ["a\u{1}b\u{1F}c"]
+(fmt "%v" s)     ; Str("a\u{1}b\u{1f}c")
 ```
 
 A nested `%s` uses the reader's own escapes and nothing else, so the reader can
-read it back and `(eval ($ "%s" [s]))` is an array whose first element is `s`. A
+read it back and `(eval (fmt "%s" [s]))` is an array whose first element is `s`. A
 control character has no short escape of its own, so it is written as the
 `\u{HEX}` escape of Section 1.6, which the reader also accepts. `%q` and `%x`
 apply the same table, described in Section 15.3, so all three agree.
 
 `%j` is the one that does not read back. It escapes a control character as the
 JSON form `\u0001`, and the reader has no brace-less `\u` escape (Section 1.6), so
-`(eval ($ "%j" s))` on such a string is a `ParseError: a unicode escape must be
+`(eval (fmt "%j" s))` on such a string is a `ParseError: a unicode escape must be
 written \u{HEX}` rather than a wrong value. It fails loudly, so the danger is
 losing the step, not reading a corrupted value back. `%j` is JSON, so it is
 deliberately not changed to suit the reader. Use `%s` on a one element array, or
@@ -1608,9 +1608,9 @@ private use character are all written as themselves, so a string of ordinary
 text comes out looking like itself.
 
 ```
-($ "%q" "a\u{1}b")   ; "a\u{1}b"
-($ "%q" "é😀")       ; "é😀"
-($ "%q" "a\"b\\c")   ; "a\"b\\c"
+(fmt "%q" "a\u{1}b")   ; "a\u{1}b"
+(fmt "%q" "é😀")       ; "é😀"
+(fmt "%q" "a\"b\\c")   ; "a\"b\\c"
 ```
 
 The result re-parses as the same string, and it is also a string a person can
@@ -1653,7 +1653,7 @@ functions is identity (Section 10). References are dereferenced, and an invalid
 reference propagates a type error.
 
 A float is written in plain decimal, never in exponent notation, so
-`($ "%x" 100000000000000000000.0)` is `100000000000000000000.0` and reads back
+`(fmt "%x" 100000000000000000000.0)` is `100000000000000000000.0` and reads back
 as the same value. Rust's exponent form is expanded before printing.
 
 ### 15.5 d, b, h, o
@@ -1741,7 +1741,7 @@ becomes `Ref(<invalid>)`. The wrapper is kept, unlike `%s`, `%x` and `%j`, so
 that structures containing cycles stay printable.
 
 `%v` is a Rust debug rendering, so a float infinity is lowercase:
-`($ "%v" Inf)` is `Float(inf)`, while `%s` and `%x` use `Inf`. A string is shown
+`(fmt "%v" Inf)` is `Float(inf)`, while `%s` and `%x` use `Inf`. A string is shown
 with Rust's own debug escaping, which is close to JSON but not identical for
 rare characters.
 
@@ -1763,12 +1763,12 @@ no argument.
 | a zero match index, such as `%0` or `%0.1` | `FormatError` |
 | a match index or capture index out of range | `FormatError` |
 | a capture index that is not a number, such as `%1.x` | `FormatError` |
-| a selector such as `%x` that is not a number at all | the whole `$` call is a `FormatError: FormatArityError` |
+| a selector such as `%x` that is not a number at all | the whole `fmt` call is a `FormatError: FormatArityError` |
 
 The selector is checked in this order: a missing `%~` is reported first, then a
 match index below 1, then a capture index below 1, then an out of range match
-index, then an out of range capture index. So `($ "%0.1" "a" "a")` complains
-about the missing `%~`, while `($ "%~%0.1" "a" "a")` complains about the match
+index, then an out of range capture index. So `(fmt "%0.1" "a" "a")` complains
+about the missing `%~`, while `(fmt "%~%0.1" "a" "a")` complains about the match
 index.
 
 A format string may contain several `%~` sections, but each one consumes two
@@ -1779,7 +1779,7 @@ that follow it. A bare `%~` with its two arguments emits nothing.
 
 | Situation | Printed text |
 | --------- | ------------ |
-| no argument at all | `ArityError: $ expects format string` |
+| no argument at all | `ArityError: fmt expects format string` |
 | the format is not a string | `TypeError: expected string` |
 | a trailing `%` | `FormatError: trailing %` |
 | an unknown specifier | `FormatError: unknown specifier %z` |
@@ -1855,12 +1855,12 @@ first match exists, which turns `%2.1` into an out of range error. A bare `%N` i
 `%1.N`, so it is a capture of the first match and does not need `g`:
 
 ```
-($ "%~%1.1" "(a)(b)" "ab")   ; ab, the whole match
-($ "%~%1.2" "(a)(b)" "ab")   ; a,  the first group
-($ "%~%1.3" "(a)(b)" "ab")   ; b,  the second group
-($ "%~%2"   "(a)(b)" "ab")   ; a,  the same as %1.2
-($ "%~%2.1" "(a)"   "aa")    ; a,  the second match, thanks to the default g
-($ "%~%2.1" "m~(a)" "aa")    ; FormatError: match index 2 out of range
+(fmt "%~%1.1" "(a)(b)" "ab")   ; ab, the whole match
+(fmt "%~%1.2" "(a)(b)" "ab")   ; a,  the first group
+(fmt "%~%1.3" "(a)(b)" "ab")   ; b,  the second group
+(fmt "%~%2"   "(a)(b)" "ab")   ; a,  the same as %1.2
+(fmt "%~%2.1" "(a)"   "aa")    ; a,  the second match, thanks to the default g
+(fmt "%~%2.1" "m~(a)" "aa")    ; FormatError: match index 2 out of range
 ```
 
 A pattern that starts with option letters followed by `~` is interpreted as an
@@ -2244,7 +2244,7 @@ interrupt.
             (break i)
             (set i (add i 1))))))))
 (let answer (find 19999999))
-(io.write 1 ($ "answer=%s\n" answer))
+(io.write 1 (fmt "answer=%s\n" answer))
 ```
 
 The transcript is what a terminal shows.
@@ -2412,7 +2412,7 @@ An empty file runs and exits with 0.
 | `(bit-not a)` | exactly 1 | |
 | `(bit-shl a n)` | exactly 2 | `n` must be 0 to 63. |
 | `(bit-shr a n)` | exactly 2 | `n` must be 0 to 63. |
-| `($ fmt ...)` | 1 or more | Section 15. |
+| `(fmt fmt ...)` | 1 or more | Section 15. |
 | `(and ...)` | 0 or more | Section 11.3. |
 | `(or ...)` | 0 or more | Section 11.4. |
 | `(not a)` | exactly 1 | Section 11.5. |
@@ -2437,55 +2437,55 @@ Quick reference. Section 15 is normative.
 
 | Specifier | Example | Result |
 | --------- | ------- | ------ |
-| `%s` | `($ "%s" "a")` | `a` |
-| `%s` | `($ "%s" [1 "a"])` | `[1 "a"]` |
-| `%s` | `($ "%s" {a: 1})` | `{a:1}` |
-| `%s` | `($ "%s" {a: 1 b: 2})` | `{a:1 b:2}` |
-| `%s` | `($ "%s" [t f _])` | `[true false ]` |
-| `%s` | `($ "%s" (fn (x) x))` | `<fn>` |
-| `%s` | `($ "%s" str.upper._)` | `<native fn>` |
-| `%q` | `($ "%q" "hi\n")` | `"hi\n"` |
-| `%q` | `($ "%q" "it's")` | `"it's"` |
-| `%q` | `($ "%q" "a\"b")` | `"a\"b"` |
-| `%q` | `($ "%q" "a\\b")` | `"a\\b"` |
-| `%x` | `($ "%x" [1 t _])` | `[1 t _]` |
-| `%x` | `($ "%x" {a: 1})` | `{a:1}` |
-| `%x` | `($ "%x" "a\nb")` | `"a\nb"` |
-| `%x` | `($ "%x" Inf)` | `Inf` |
-| `%x` | `($ "%x" (fn (x) x))` | `(fn (x) x)` |
-| `%x` | `($ "%x" (fn (b) ((let c 1) (add b c))))` | `(fn (b) ((let c 1) (add b c)))` |
-| `%x` | `($ "%x" str.upper._)` | `str.upper._` |
-| `%x` | `($ "%x" [(fn (a) a) 1])` | `[(fn (a) a) 1]` |
-| `%d` | `($ "%d" 42)` | `42` |
-| `%b` | `($ "%b" 5)` | `101` |
-| `%8b` | `($ "%8b" 256)` | `00000000` |
-| `%8b` | `($ "%8b" -1)` | `11111111` |
-| `%16b` | `($ "%16b" -1)` | `1111111111111111` |
-| `%32b` | `($ "%32b" -1)` | `11111111111111111111111111111111` |
-| `%h` | `($ "%h" 255)` | `ff` |
-| `%16h` | `($ "%16h" -1)` | `ffff` |
-| `%32h` | `($ "%32h" -1)` | `ffffffff` |
-| `%64h` | `($ "%64h" -1)` | `ffffffffffffffff` |
-| `%o` | `($ "%o" 8)` | `10` |
-| `%o` | `($ "%o" -1)` | `1777777777777777777777` |
-| `%f` | `($ "%f" 1.5)` | `1.5` |
-| `%f` | `($ "%f" 9007199254740993)` | `9007199254740993` |
-| `%f` | `($ "%f" 9223372036854775807)` | `9223372036854775807` |
-| `%f` | `($ "%f" NaN)` | `NaN` |
-| `%j` | `($ "%j" {a: 1})` | `{"a":1}` |
-| `%j` | `($ "%j" [1 "a"])` | `[1,"a"]` |
-| `%j` | `($ "%j" 1.0)` | `1` |
-| `%t` | `($ "%t" [1])` | `array` |
-| `%t` | `($ "%t" 0.0)` | `float` |
-| `%t` | `($ "%t" (^ a))` | `ref` |
-| `%v` | `($ "%v" [1])` | `Array([Int(1)])` |
-| `%v` | `($ "%v" {a: 1})` | `Struct({a: Int(1)})` |
-| `%v` | `($ "%v" (^ a[1]))` | `Ref(Int(1))` |
-| `%%` | `($ "100%%")` | `100%` |
-| `%~%1.1` | `($ "%~%1.1" "(a)(b)" "ab")` | `ab` |
-| `%~%1.2` | `($ "%~%1.2" "(a)(b)" "ab")` | `a` |
-| `%~%2` | `($ "%~%2" "(a)(b)" "ab")` | `a` |
-| `%~` with no match | `($ "[%~%1.1]" "zz" "ab")` | `[f]` |
+| `%s` | `(fmt "%s" "a")` | `a` |
+| `%s` | `(fmt "%s" [1 "a"])` | `[1 "a"]` |
+| `%s` | `(fmt "%s" {a: 1})` | `{a:1}` |
+| `%s` | `(fmt "%s" {a: 1 b: 2})` | `{a:1 b:2}` |
+| `%s` | `(fmt "%s" [t f _])` | `[true false ]` |
+| `%s` | `(fmt "%s" (fn (x) x))` | `<fn>` |
+| `%s` | `(fmt "%s" str.upper._)` | `<native fn>` |
+| `%q` | `(fmt "%q" "hi\n")` | `"hi\n"` |
+| `%q` | `(fmt "%q" "it's")` | `"it's"` |
+| `%q` | `(fmt "%q" "a\"b")` | `"a\"b"` |
+| `%q` | `(fmt "%q" "a\\b")` | `"a\\b"` |
+| `%x` | `(fmt "%x" [1 t _])` | `[1 t _]` |
+| `%x` | `(fmt "%x" {a: 1})` | `{a:1}` |
+| `%x` | `(fmt "%x" "a\nb")` | `"a\nb"` |
+| `%x` | `(fmt "%x" Inf)` | `Inf` |
+| `%x` | `(fmt "%x" (fn (x) x))` | `(fn (x) x)` |
+| `%x` | `(fmt "%x" (fn (b) ((let c 1) (add b c))))` | `(fn (b) ((let c 1) (add b c)))` |
+| `%x` | `(fmt "%x" str.upper._)` | `str.upper._` |
+| `%x` | `(fmt "%x" [(fn (a) a) 1])` | `[(fn (a) a) 1]` |
+| `%d` | `(fmt "%d" 42)` | `42` |
+| `%b` | `(fmt "%b" 5)` | `101` |
+| `%8b` | `(fmt "%8b" 256)` | `00000000` |
+| `%8b` | `(fmt "%8b" -1)` | `11111111` |
+| `%16b` | `(fmt "%16b" -1)` | `1111111111111111` |
+| `%32b` | `(fmt "%32b" -1)` | `11111111111111111111111111111111` |
+| `%h` | `(fmt "%h" 255)` | `ff` |
+| `%16h` | `(fmt "%16h" -1)` | `ffff` |
+| `%32h` | `(fmt "%32h" -1)` | `ffffffff` |
+| `%64h` | `(fmt "%64h" -1)` | `ffffffffffffffff` |
+| `%o` | `(fmt "%o" 8)` | `10` |
+| `%o` | `(fmt "%o" -1)` | `1777777777777777777777` |
+| `%f` | `(fmt "%f" 1.5)` | `1.5` |
+| `%f` | `(fmt "%f" 9007199254740993)` | `9007199254740993` |
+| `%f` | `(fmt "%f" 9223372036854775807)` | `9223372036854775807` |
+| `%f` | `(fmt "%f" NaN)` | `NaN` |
+| `%j` | `(fmt "%j" {a: 1})` | `{"a":1}` |
+| `%j` | `(fmt "%j" [1 "a"])` | `[1,"a"]` |
+| `%j` | `(fmt "%j" 1.0)` | `1` |
+| `%t` | `(fmt "%t" [1])` | `array` |
+| `%t` | `(fmt "%t" 0.0)` | `float` |
+| `%t` | `(fmt "%t" (^ a))` | `ref` |
+| `%v` | `(fmt "%v" [1])` | `Array([Int(1)])` |
+| `%v` | `(fmt "%v" {a: 1})` | `Struct({a: Int(1)})` |
+| `%v` | `(fmt "%v" (^ a[1]))` | `Ref(Int(1))` |
+| `%%` | `(fmt "100%%")` | `100%` |
+| `%~%1.1` | `(fmt "%~%1.1" "(a)(b)" "ab")` | `ab` |
+| `%~%1.2` | `(fmt "%~%1.2" "(a)(b)" "ab")` | `a` |
+| `%~%2` | `(fmt "%~%2" "(a)(b)" "ab")` | `a` |
+| `%~` with no match | `(fmt "[%~%1.1]" "zz" "ab")` | `[f]` |
 
 ---
 
@@ -2536,7 +2536,7 @@ is auditable. Each item was verified against the interpreter.
     match `^[A-Za-z][A-Za-z0-9_-]*$` (Section 2.1), and any other non-numeric
     run is a `ParseError: invalid name \`<run>\``. This is a deliberate
     tightening, not a correction of a misreading: it also retires the
-    standalone `~` name, which stays meaningful only inside `$` format
+    standalone `~` name, which stays meaningful only inside `fmt` format
     strings.
 13. The field-access root rule moved from evaluation to the reader. A dot
     after a literal or a block, as in `5.x` or `({a: 1}).a`, was a `TypeError:

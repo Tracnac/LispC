@@ -10,7 +10,7 @@ fn decimal_floats_do_not_conflict_with_field_access() {
 #[test]
 fn non_finite_float_literals_follow_numeric_semantics() {
     check(
-        "(expect ($ \"%t:%s\" NaN NaN) \"float:NaN\") (expect ($ \"%t:%s\" +NaN +NaN) \"float:NaN\") (expect ($ \"%t:%s\" -NaN -NaN) \"float:NaN\") (expect ($ \"%t:%s\" Inf Inf) \"float:Inf\") (expect ($ \"%t:%s\" +Inf +Inf) \"float:Inf\") (expect ($ \"%t:%s\" -Inf -Inf) \"float:-Inf\") (expect (eq +NaN NaN) f) (expect (eq +Inf Inf) t) (expect (eq NaN NaN) f) (expect (eq Inf Inf) t) (expect (eq -Inf -Inf) t) (expect (eq 0.0 -0.0) t) (expect (eq 5 5.0) t) (expect (lt 1.0 Inf) t) (expect (lt -Inf 1.0) t) (expect (lt NaN 1.0) f) (expect (gt NaN 1.0) f) (expect (eq -NaN NaN) f) (expect (eq -NaN -NaN) f) (expect (lt -NaN 1.0) f) (expect ($ \"%s\" (add -NaN 1.0)) ($ \"%s\" NaN)) (expect ($ \"%s\" (mul -NaN 2.0)) ($ \"%s\" NaN)) (expect ($ \"%s\" (div -NaN 1.0)) ($ \"%s\" NaN))",
+        "(expect (fmt \"%t:%s\" NaN NaN) \"float:NaN\") (expect (fmt \"%t:%s\" +NaN +NaN) \"float:NaN\") (expect (fmt \"%t:%s\" -NaN -NaN) \"float:NaN\") (expect (fmt \"%t:%s\" Inf Inf) \"float:Inf\") (expect (fmt \"%t:%s\" +Inf +Inf) \"float:Inf\") (expect (fmt \"%t:%s\" -Inf -Inf) \"float:-Inf\") (expect (eq +NaN NaN) f) (expect (eq +Inf Inf) t) (expect (eq NaN NaN) f) (expect (eq Inf Inf) t) (expect (eq -Inf -Inf) t) (expect (eq 0.0 -0.0) t) (expect (eq 5 5.0) t) (expect (lt 1.0 Inf) t) (expect (lt -Inf 1.0) t) (expect (lt NaN 1.0) f) (expect (gt NaN 1.0) f) (expect (eq -NaN NaN) f) (expect (eq -NaN -NaN) f) (expect (lt -NaN 1.0) f) (expect (fmt \"%s\" (add -NaN 1.0)) (fmt \"%s\" NaN)) (expect (fmt \"%s\" (mul -NaN 2.0)) (fmt \"%s\" NaN)) (expect (fmt \"%s\" (div -NaN 1.0)) (fmt \"%s\" NaN))",
         "t",
     );
 }
@@ -34,7 +34,7 @@ fn a_negative_nan_carries_the_sign_bit() {
             if signed { "set" } else { "clear" }
         );
         // However it is spelled, it writes as `NaN` and not as `-NaN`.
-        check(&format!(r#"($ "%t:%s" {src} {src})"#), r#""float:NaN""#);
+        check(&format!(r#"(fmt "%t:%s" {src} {src})"#), r#""float:NaN""#);
     }
 }
 
@@ -76,15 +76,15 @@ fn a_negative_nan_is_reserved_like_a_negative_infinity() {
 
 #[test]
 fn mul_with_float_operand_promotes_to_float() {
-    check(r#"($ "%t:%s" (mul 2 2.5) (mul 2 2.5))"#, r#""float:5""#);
+    check(r#"(fmt "%t:%s" (mul 2 2.5) (mul 2 2.5))"#, r#""float:5""#);
 }
 
 #[test]
 fn sub_with_float_operand_promotes_to_float() {
-    check(r#"($ "%t:%s" (sub 10 2.5) (sub 10 2.5))"#, r#""float:7.5""#);
+    check(r#"(fmt "%t:%s" (sub 10 2.5) (sub 10 2.5))"#, r#""float:7.5""#);
 }
 
 #[test]
 fn div_fold_keeps_integer_division() {
-    check(r#"($ "%t:%s" (div 10 2 4) (div 10 2 4))"#, r#""int:1""#);
+    check(r#"(fmt "%t:%s" (div 10 2 4) (div 10 2 4))"#, r#""int:1""#);
 }

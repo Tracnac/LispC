@@ -374,7 +374,7 @@ fn binding_form_and_builtin_names_is_rejected() {
         "(let fn 1)",
         "(let expect 1)",
         "(let add 1)",
-        "(let $ 1)",
+        "(let fmt 1)",
         "(let eval 1)",
     ] {
         assert!(
@@ -500,7 +500,7 @@ fn set_does_not_create_a_new_binding() {
 #[test]
 fn reference_value_has_ref_type_tag() {
     check(
-        r#"((let value 42)($ "%t:%s" (^ value) (^ value)))"#,
+        r#"((let value 42)(fmt "%t:%s" (^ value) (^ value)))"#,
         r#""ref:42""#,
     );
 }

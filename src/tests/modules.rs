@@ -10,7 +10,7 @@ fn native_str_module_is_loaded_and_introspectable() {
                (expect str.upper.spec.arity 1)
                (expect str.upper.spec.type ["string"])
                (expect str.upper.spec.return ["string"])
-               ($ "%s" str.upper)"#)
+               (fmt "%s" str.upper)"#)
     .unwrap();
     assert!(matches!(
         value,
@@ -47,7 +47,7 @@ fn rebinding_a_module_value_copies_its_descriptors() {
     let value = run(r#"(use "str")
                (let m2 str)
                (set m2.upper.spec.arity 2)
-               ($ "%s:%s" str.upper.spec.arity m2.upper.spec.arity)"#)
+               (fmt "%s:%s" str.upper.spec.arity m2.upper.spec.arity)"#)
     .unwrap();
     assert!(matches!(value, Value::Str(text) if text == "1:2"));
 }
@@ -128,7 +128,7 @@ fn module_argument_validation_reports_the_call_site_after_nested_evaluation() {
     let source = r#"
 (let module {
     open: {
-        _: (fn (x y) (io.write 1 ($ "Called open with args %s and %s\n" x y)))
+        _: (fn (x y) (io.write 1 (fmt "Called open with args %s and %s\n" x y)))
         spec: {
             documentation: "open"
             arity: 2
@@ -434,7 +434,7 @@ fn use_binds_like_let_and_never_modifies_an_existing_binding() {
         Err(Error::DuplicateBinding(name)) if name == "io"
     ));
     // Shadowing across scopes stays allowed and leaves the outer binding alone.
-    let value = run(r#"(use "io") (() (use "str")) ($ "%t" (use "str"))"#).unwrap();
+    let value = run(r#"(use "io") (() (use "str")) (fmt "%t" (use "str"))"#).unwrap();
     assert!(matches!(value, Value::Str(text) if text == "struct"));
 }
 
@@ -443,7 +443,7 @@ fn use_registers_a_predefined_lisp_module_and_returns_it() {
     // The supported way to register a Lisp module: `(let name {…})` defines it,
     // `(use "name")` validates its syntax and registers it.
     let value = run(r#"(let mymodule {
-                greet: {_: (fn (name) ($ "Hello %s!" name)) spec: {
+                greet: {_: (fn (name) (fmt "Hello %s!" name)) spec: {
                     documentation: "Greets a person."
                     arity: 1
                     type: ["string"]
@@ -452,7 +452,7 @@ fn use_registers_a_predefined_lisp_module_and_returns_it() {
             })
             (let registered (use "mymodule"))
             (expect (mymodule.greet "Yvan") "Hello Yvan!")
-            ($ "%t" registered)"#)
+            (fmt "%t" registered)"#)
     .unwrap();
     assert!(matches!(value, Value::Str(text) if text == "struct"));
 }

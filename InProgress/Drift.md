@@ -44,7 +44,7 @@ Every claim marked **[probe]** was executed against the release binary. The lang
 ```sh
 cat > /tmp/pre.lisp <<'EOF'
 (use "io")
-(let p (fn (x) (io.write 1 ($ "%v\n" x))))
+(let p (fn (x) (io.write 1 (fmt "%v\n" x))))
 EOF
 cat /tmp/pre.lisp /tmp/probe.lisp | ./target/release/small-lisp
 ```
@@ -72,12 +72,12 @@ Anything **not** probe-verified is labelled _code-reading-derived_.
 
 The most serious items:
 
-- **G2** — `%s` emits JSON escapes the Lisp reader cannot parse back; `(eval ($ "%s" [s]))`
+- **G2** — `%s` emits JSON escapes the Lisp reader cannot parse back; `(eval (fmt "%s" [s]))`
   silently _expands_ strings containing control bytes. Data corruption.
 - **G3** — a deferred Ctrl-C in the REPL **silently swallows the next line typed**.
 - **G4** — `r+`/`w+` writes land at the reader's prefetch offset, not the documented
   "current stream position". Documented in two places; neither is true.
-- **G1** — all 12 `$` error sites print a doubled `FormatError: FormatError:` prefix.
+- **G1** — all 12 `fmt` error sites print a doubled `FormatError: FormatError:` prefix.
 - **B1** — `spec.txt` states both "reserved names cannot be binding names" and "reserved names
   _can_ be binding names", three lines apart.
 - **A15** — the §3 grammar cannot derive `(io.write 1 "x")`, `box[1]`, or `(add 1 2)[1]`.
@@ -404,8 +404,8 @@ The code matches line 27. See A2.
 The code uses `FormatTypeError` for widths and a bare message for overflow:
 
 ```lisp
-(p ($ "%7b" 5))                  ; FormatError: FormatTypeError: %7b supports widths 8, 16, 32, or 64
-(p ($ "%99999999999999999999b" 5)) ; FormatError: invalid binary width
+(p (fmt "%7b" 5))                  ; FormatError: FormatTypeError: %7b supports widths 8, 16, 32, or 64
+(p (fmt "%99999999999999999999b" 5)) ; FormatError: invalid binary width
 ```
 
 Two different taxonomies for one error class. (`src/main.rs:2752`, `2768` vs the overflow path.)
@@ -423,7 +423,7 @@ document (`spec.txt:66`, `spec.txt:154`). See A12.
 
 ### B8 — the §9 coercion table is incomplete
 
-`spec.txt:238`'s `$ (%b/%h/%o)` row lists only the **binary** fixed widths (`%8b %16b %32b %64b`).
+`spec.txt:238`'s `fmt (%b/%h/%o)` row lists only the **binary** fixed widths (`%8b %16b %32b %64b`).
 The hexadecimal fixed widths (`%8h %16h %32h %64h`) are documented at `spec.txt:332-334` and
 `README.md:211` but are missing from the table.
 
@@ -507,8 +507,8 @@ complement representations for negative integers."
 The **unfixed** `%o` and `%h` also emit two's complement, unmentioned:
 
 ```lisp
-(p ($ "%o" -1))   ; Str("1777777777777777777777")
-(p ($ "%h" -1))   ; Str("ffffffffffffffff")
+(p (fmt "%o" -1))   ; Str("1777777777777777777777")
+(p (fmt "%h" -1))   ; Str("ffffffffffffffff")
 ```
 
 (`spec.txt:329-330`, `333-334` document two's complement for the fixed-width **binary** and
@@ -567,7 +567,7 @@ for the nested strings it quotes. It is **not** `%q`'s set, and the difference i
 | **E3** | `todo:84`                        | "Descriptor (**2226**)"                                                         | `src/main.rs:2231` (in `call`), `src/main.rs:2245` (in `invoke_operator`)                                                                                                                                                              |
 | **E4** | `todo:84`                        | "recursion-guard (**2442**)"                                                    | `src/main.rs:2458` (inside `invoke`, `src/main.rs:2422`)                                                                                                                                                                               |
 | **E5** | `todo:85`                        | "(eval) **2169-2182**"                                                          | `src/main.rs:2175-2206`                                                                                                                                                                                                                |
-| **E6** | `todo:110`                       | "`examples/quick.lisp` still uses the old one-step shape (user WIP, untouched)" | **Wrong twice.** The file is now 0 bytes. And at `HEAD` it was `(use "io")(io.write 1 ($ "Hello %s %~%1.1" "Yvan" "(a)(b)" "xxabyyabzz"))` — the _native two-step_ form, never the removed `(use (let …))` shape this entry describes. |
+| **E6** | `todo:110`                       | "`examples/quick.lisp` still uses the old one-step shape (user WIP, untouched)" | **Wrong twice.** The file is now 0 bytes. And at `HEAD` it was `(use "io")(io.write 1 (fmt "Hello %s %~%1.1" "Yvan" "(a)(b)" "xxabyyabzz"))` — the _native two-step_ form, never the removed `(use (let …))` shape this entry describes. |
 | **E7** | `todo:41`                        | "13 tests in src/tests/semantics.rs"                                            | ✅ correct                                                                                                                                                                                                                             |
 | **E8** | `todo:59`                        | "innermost 40 frames"                                                           | ✅ correct (`src/main.rs:3249`)                                                                                                                                                                                                        |
 
@@ -616,8 +616,8 @@ ever appears on the success path.
 `%64b` with `5` only.
 
 ```lisp
-(p ($ "%32b" -1))   ; Str("11111111111111111111111111111111")   <- works, untested
-(p ($ "%64b" -1))   ; Str("1111111111111111111111111111111111111111111111111111111111111111")
+(p (fmt "%32b" -1))   ; Str("11111111111111111111111111111111")   <- works, untested
+(p (fmt "%64b" -1))   ; Str("1111111111111111111111111111111111111111111111111111111111111111")
 ```
 
 ### F8 — `eq` function identity is untested
@@ -661,7 +661,7 @@ No test.
 
 ### F12 — the §14 error-reporting half is nearly untested
 
-No test asserts _where_ a `$` error points. Only the three `LAST_ERROR_SPAN` regressions in
+No test asserts _where_ a `fmt` error points. Only the three `LAST_ERROR_SPAN` regressions in
 `src/tests/errors.rs` touch attribution at all.
 
 ---
@@ -670,7 +670,7 @@ No test asserts _where_ a `$` error points. Only the three `LAST_ERROR_SPAN` reg
 
 These are implementation bugs, not documentation drift.
 
-### G1 — every `$` error message prints a doubled `FormatError:` prefix
+### G1 — every `fmt` error message prints a doubled `FormatError:` prefix
 
 `Error::Format`'s `Display` arm adds `FormatError: ` (`src/main.rs:150`), but **12** raise sites
 bake the same prefix into the message itself.
@@ -681,11 +681,11 @@ bake the same prefix into the message itself.
 | `src/main.rs:2596`, `2602`, `2700`, `2707`, `2714`, `2721`, `2727`, `2901` | `FormatTypeError`  |
 
 ```
-$ ($ "%7b" 5)     → FormatError: FormatTypeError: %7b supports widths 8, 16, 32, or 64
-$ ($ "%d" "x")    → FormatError: FormatTypeError: %d expects integer
-$ ($ "%q" 5)      → FormatError: FormatTypeError: %q expects string
-$ ($ "%s" 5)      → FormatError: FormatArityError
-$ ($ "%~%2.1" "U~(a)|(b)" "ab")
+fmt (fmt "%7b" 5)     → FormatError: FormatTypeError: %7b supports widths 8, 16, 32, or 64
+fmt (fmt "%d" "x")    → FormatError: FormatTypeError: %d expects integer
+fmt (fmt "%q" 5)      → FormatError: FormatTypeError: %q expects string
+fmt (fmt "%s" 5)      → FormatError: FormatArityError
+fmt (fmt "%~%2.1" "U~(a)|(b)" "ab")
                   → FormatError: FormatError: match index 2 out of range
 ```
 
@@ -701,8 +701,8 @@ five literal characters `u0001`.
 
 ```lisp
 (let s (str.lower 'A<BEL>B<DEL>C'))   ; raw string, 4 bytes: 61 01 62 7f 63
-($ "%s" [s])           ; => ["a<BEL>b<DEL>c"]     <-- raw bytes inside the quotes
-(eval ($ "%s" [s]))    ; => ["au0001b<DEL>c"]     <-- 4 bytes became 5
+(fmt "%s" [s])           ; => ["a<BEL>b<DEL>c"]     <-- raw bytes inside the quotes
+(eval (fmt "%s" [s]))    ; => ["au0001b<DEL>c"]     <-- 4 bytes became 5
 ```
 
 `%q` and `%x` are **correct** — they use `lisp_string` (`src/main.rs:2882-2895`), which matches
@@ -711,9 +711,9 @@ verbatim) and re-parses identically. Verified round-trip for the 5-escape set:
 
 ```lisp
 (let s "A\tB\nC\\D\"E")
-($ "%s" [s])        ; => ["A\tB\nC\\D\"E"]
-(eval ($ "%s" [s])) ; => ["A\tB\nC\\D\"E"]        <- correct
-($ "%q" s)          ; => "A\tB\nC\\D\"E"          <- correct
+(fmt "%s" [s])        ; => ["A\tB\nC\\D\"E"]
+(eval (fmt "%s" [s])) ; => ["A\tB\nC\\D\"E"]        <- correct
+(fmt "%q" s)          ; => "A\tB\nC\\D\"E"          <- correct
 ```
 
 **Fix:** `render_nested` should call `lisp_string`, not `json_string`. This also closes the
@@ -764,7 +764,7 @@ fallthrough, or raise a `ParseError` on an unknown escape.
 ### G6 — `expect`'s message uses the debug renderer
 
 `src/main.rs:2131-2135` uses `debug_render`, so failures read `expected Int(2), got Int(1)` —
-inconsistent with `$`'s `%s` and with every other user-facing value rendering in the language. The
+inconsistent with `fmt`'s `%s` and with every other user-facing value rendering in the language. The
 semantics are right; only the rendering is off. See C5.
 
 ### G7 — smaller undocumented failure modes
@@ -797,7 +797,7 @@ Confirmed accurate and mutually consistent across code, spec, and README:
   frames (`src/main.rs:3249`).
 - `RESERVED_NAMES` ↔ `call` dispatch ↔ `spec.txt:32-38` all agree on the same 34 names.
 - `<invalid reference>` at the root vs `null` in a nested `%s` position.
-- `README.md:73-80`'s module example; the `"any"` wildcard rules; `$` arity and type errors.
+- `README.md:73-80`'s module example; the `"any"` wildcard rules; `fmt` arity and type errors.
 - `README.md:139-177`'s performance note matches the implemented Model P.
 
 ---

@@ -162,8 +162,8 @@ fn native_module_errors_point_at_the_call_not_the_argument() {
 #[test]
 fn format_errors_point_at_the_dollar_call() {
     // A format-string error used to be attributed to the last evaluated
-    // argument (the format literal); it must point at the `$` call (col 1).
-    let source = r#"($ "%q")"#;
+    // argument (the format literal); it must point at the `fmt` call (col 1).
+    let source = r#"(fmt "%q")"#;
     let error = match run(source) {
         Err(error) => error,
         Ok(_) => panic!("expected format arity error"),
@@ -171,5 +171,5 @@ fn format_errors_point_at_the_dollar_call() {
     let span = LAST_ERROR_SPAN.with(|span| span.get());
     let rendered = diagnostic(&error, source, "sample.lisp", span);
     assert!(rendered.starts_with("sample.lisp:1:1:"), "{rendered}");
-    assert!(rendered.contains("($ \"%q\")"));
+    assert!(rendered.contains("(fmt \"%q\")"));
 }

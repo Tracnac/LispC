@@ -41,7 +41,7 @@ fn native_io_module_is_loaded_and_introspectable() {
            (expect io.open.spec.arity 1)
            (expect io.open.spec.type ["string"])
            (expect io.open.spec.return ["int"])
-           ($ "%s" io.open.spec.documentation)"#)
+           (fmt "%s" io.open.spec.documentation)"#)
     .unwrap();
     assert!(matches!(
         value,

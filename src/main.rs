@@ -490,17 +490,17 @@ fn lex_tokens(src: &str, at: &mut usize) -> Result<Vec<Tok>, Error> {
             i += 1;
             continue;
         }
-        if c == '$' {
-            out.push(Tok {
-                kind: TokKind::Symbol(c.to_string()),
-                span: Span {
-                    start: token_start,
-                    end: i + 1,
-                },
-            });
-            i += 1;
-            continue;
-        }
+        // if c == '$' {
+        //     out.push(Tok {
+        //         kind: TokKind::Symbol(c.to_string()),
+        //         span: Span {
+        //             start: token_start,
+        //             end: i + 1,
+        //         },
+        //     });
+        //     i += 1;
+        //     continue;
+        // }
         if c == '"' || c == '\'' {
             let quote = c;
             let raw = quote == '\'';
@@ -1581,7 +1581,7 @@ fn need(args: &[Expr], n: usize, name: &str) -> Result<(), Flow> {
 }
 const RESERVED_NAMES: &[&str] = &[
     "let", "set", "if", "fn", "loop", "break", "continue", "match", "and", "or", "not", "expect",
-    "use", "eval", "$", "add", "sub", "mul", "div", "mod", "pow", "eq", "ne", "lt", "gt", "le",
+    "use", "eval", "fmt", "add", "sub", "mul", "div", "mod", "pow", "eq", "ne", "lt", "gt", "le",
     "ge", "bit-and", "bit-or", "bit-xor", "bit-not", "bit-shl", "bit-shr", "repl",
 ];
 
@@ -2510,7 +2510,7 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, call_span: Span) -> 
                 env.borrow_mut().modules.push(name);
                 return Ok(module);
             }
-            "$" => return format_value(args, env, l, call_span),
+            "fmt" => return format_value(args, env, l, call_span),
             "eval" => {
                 need(args, 1, "eval")?;
                 let source = as_str(eval(&args[0], env, l)?)?;
@@ -2902,12 +2902,12 @@ fn emit_capture(
 }
 fn format_value(args: &[Expr], env: &EnvRef, l: usize, call_span: Span) -> EResult {
     if args.is_empty() {
-        return Err(Error::Arity("$ expects format string".into()).into());
+        return Err(Error::Arity("fmt expects format string".into()).into());
     }
     let fmt = as_str(eval(&args[0], env, l)?)?;
     let vs = values(&args[1..], env, l)?;
     // Format-string errors (trailing %, FormatArityError, …) should point at
-    // the `$` call, not at the last argument evaluated above.
+    // the `fmt` call, not at the last argument evaluated above.
     LAST_ERROR_SPAN.with(|span| span.set(Some(call_span)));
     let mut out = String::new();
     let mut it = fmt.chars().peekable();
