@@ -640,6 +640,11 @@ selector      := form | form ".." form | "[" form* "]"
   their branch is itself a `()`.
 - `.` is the only way to read a struct field. Arrays are indexed only with
   brackets: `arr[1]`, `arr[-1]`, `arr[2..5]`, `arr[[1 3]]`.
+- A bracket selector must immediately follow the expression it indexes:
+  `arr[1]` is a selector, while `arr [1]` remains two separate forms. A
+  separate array argument is valid; if it causes a function arity error, the
+  diagnostic points at `[` and suggests `value[index]` as a possible intended
+  selector. Any gap, including whitespace or a comment, separates the forms.
 - A parenthesised form is a **call** when its head is a name, optionally
   followed by `.name` or `[index]` steps. A name in head position is always a
   call, even when it is bound to something that cannot be called, which gives

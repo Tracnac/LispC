@@ -1418,9 +1418,33 @@ fn eval(e: &Expr, env: &EnvRef, loop_depth: usize) -> EResult {
             }
             Ok(r)
         }
-        ExprKind::Call(head, args) => call(head, args, env, loop_depth, e.span),
+        ExprKind::Call(head, args) => match call(head, args, env, loop_depth, e.span) {
+            Err(Flow::Error(Error::Arity(message))) => {
+                if let Some(span) = spaced_array_argument_span(args) {
+                    LAST_ERROR_SPAN.with(|last| last.set(Some(span)));
+                    Err(Error::Arity(format!(
+                        "{message}; possible selector typo: write `value[index]` without a gap"
+                    ))
+                    .into())
+                } else {
+                    Err(Error::Arity(message).into())
+                }
+            }
+            outcome => outcome,
+        },
     }
 }
+
+fn spaced_array_argument_span(args: &[Expr]) -> Option<Span> {
+    args.windows(2).rev().find_map(|pair| {
+        let [previous, current] = pair else {
+            return None;
+        };
+        (matches!(&current.kind, ExprKind::Array(_)) && current.span.start > previous.span.end)
+            .then_some(current.span)
+    })
+}
+
 fn apply_index(value: Value, spec: &IndexSpec, env: &EnvRef, loop_depth: usize) -> EResult {
     let selector = match spec {
         IndexSpec::Selector(expr) => eval(expr, env, loop_depth)?,

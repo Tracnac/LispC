@@ -174,6 +174,46 @@ fn a_dot_is_a_delimiter_not_part_of_a_number_token() {
 }
 
 #[test]
+fn a_spaced_array_argument_hints_at_a_possible_selector_typo_on_arity_error() {
+    let src = "(let g (fn (n) n)) (g 7 [1])";
+    let error = match run(src) {
+        Err(error) => error,
+        Ok(_) => panic!("the call should have an arity error"),
+    };
+    assert!(
+        matches!(&error, Error::Arity(message) if message == "function expects 1, got 2; possible selector typo: write `value[index]` without a gap"),
+        "expected an arity error with a selector hint, got {error}"
+    );
+
+    let span = LAST_ERROR_SPAN.with(|span| span.get()).unwrap();
+    let bracket = src.rfind('[').unwrap();
+    assert_eq!(
+        span,
+        Span {
+            start: bracket,
+            end: bracket + 3,
+        }
+    );
+    let diagnostic = repl_diagnostic(&error, src, Some(span));
+    assert!(
+        diagnostic.contains(&format!("\n{src}\n{}^", " ".repeat(bracket))),
+        "the diagnostic caret should point to `[`, got:\n{diagnostic}"
+    );
+}
+
+#[test]
+fn array_forms_remain_valid_as_later_arguments_and_bindings() {
+    assert_eq!(
+        repl_echo(&run("(let values [10 20]) values[1]").unwrap()),
+        "10"
+    );
+    assert_eq!(
+        repl_echo(&run("(let choose (fn (n values) values)) (choose 7 [1])").unwrap()),
+        "[1]"
+    );
+}
+
+#[test]
 fn the_regexes_and_the_lexer_agree() {
     let int = Regex::new(INT_RE).unwrap();
     let float = Regex::new(FLOAT_RE).unwrap();
