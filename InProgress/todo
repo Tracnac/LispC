@@ -1,10 +1,13 @@
 Open work
 =========
 
-Every item below was re-verified against `target/release/small-lisp` at `b808131`, not carried
-over from an earlier note. Provenance for the original finding is the `(Drift.md Xn)` tag;
-`InProgress/Drift.md` is the audit those tags point into and is kept as a record of what was
-found, not as a work queue. Finished work and its reasoning are in the commit log, not here.
+Thirteen entries, and every one of them is still open: four bugs, one documented timing choice,
+three performance items, and five records of work that was checked and dropped. All were
+re-verified against `target/release/small-lisp` at `911040f`, not carried over from an earlier
+note, and the source line numbers were corrected in the same pass because earlier commits had
+moved them. Provenance for the original finding is the `(Drift.md Xn)` tag; `InProgress/Drift.md`
+is the audit those tags point into and is kept as a record of what was found, not as a work queue.
+Finished work and its reasoning are in the commit log, not here.
 
 Bug
 ===
@@ -27,16 +30,16 @@ Bug
   `BufReader` fill boundary. With `aaa\nbbb\n`, one `io.read` logically consumes 4 bytes and a
   following write of `ZZZ` lands at offset 8. With a 9005-byte file (`aaa\n` then 9 KB) it lands
   at offset 8192, which is `BufReader`'s default capacity — an implementation detail of the
-  buffer, not a position the program ever asked for. `src/tests/io.rs:168-181` passes only because
-  its fixture is one 8-byte line, where the prefetch offset and the read position coincide at 8;
-  a two-line fixture fails. Fix options: (a) drop the `BufReader` for writable handles and use
-  one `File` with an explicit `seek` per operation; (b) track a logical position beside the buffer
-  and seek before each write. (a) is simpler and leaves read-only buffering alone.
-  (Drift.md G4, A4, C1)
+  buffer, not a position the program ever asked for. `src/tests/io.rs:164-182` passes only because
+  its fixture is the single line `initial`, 7 bytes, where the prefetch offset and the
+  read position coincide at end of file; a two-line fixture fails. Fix options: (a) drop
+  the `BufReader` for writable handles and use one `File` with an explicit `seek` per
+  operation; (b) track a logical position beside the buffer and seek before each write.
+  (a) is simpler and leaves read-only buffering alone. (Drift.md G4, A4, C1)
 
 - A missing bracket before a `[` selector is silently read as another argument. `postfix_tail`
-  (`src/main.rs:772-802`) requires strict adjacency, `token.span.start == e.span.end` at lines
-  778 and 800, and gives no diagnostic when the guard fails — the bracketed form simply becomes
+  (`src/main.rs:779-829`) requires strict adjacency, `token.span.start == e.span.end` at lines
+  785 and 807, and gives no diagnostic when the guard fails — the bracketed form simply becomes
   the next argument. Verified: given `(fn (n) n)`, `(g 7[1])` is `TypeError: indexing requires an
   array` because adjacency is honoured, but `(g 7 [1])` is `ArityError: function expects 1, got
   2`, which points at the arity and never at the space. The `.` selector does not fail the same
@@ -46,9 +49,9 @@ Bug
   error naming the position and suggesting the adjacent form. (Drift.md G7)
 
 - An `expect` failure can be uninformative, because the debug form it is required to use cannot
-  show identity. This is not a code defect: spec_en.md §11.6:1145-1146 requires both values to
-  use the debug form of §15.9, and `src/main.rs:2402-2405` does exactly that. The consequence is
-  the problem, and it has two faces. §15.9:1568 documents a function's debug form as
+  show identity. This is not a code defect: spec_en.md §11.6:1189-1190 requires both values to
+  use the debug form of §15.9, and `src/main.rs:2426-2427` does exactly that. The consequence is
+  the problem, and it has two faces. §15.9:1640 documents a function's debug form as
   `Function(b, c)`, its parameter list only, so two distinct closures both built from
   `(fn (x) x)` produce `expected Function(x), got Function(x)` — verified. The identity rule is
   honoured and the message still says nothing, which is the one case where the assertion is
@@ -59,20 +62,6 @@ Bug
   renders. It is deliberately left open, and
   `expect_compares_functions_by_identity` asserts only the pass/fail outcome, not the message,
   so either fix can land without rewriting the test. (Drift.md G6, C5)
-
-- `break` and `continue` check arity in opposite orders, and spec_en.md documents the result
-  wrongly. `break` (`src/main.rs:2324-2327`) tests `l == 0` before `args.len() > 1`; `continue`
-  (`src/main.rs:2337`) calls `need(args, 0, ...)` first. spec_en.md:1180 says "Outside a loop both
-  report the loop error first, so `(break 1 2)` outside a loop is a `BreakOutsideLoop` and not
-  an arity error." Verified: the `break` half is right, the `continue` half is false. `(break 1 2)`
-  outside a loop is `BreakOutsideLoop`, but `(continue 1)` outside a loop is `ArityError:
-  continue expects 0 arguments, got 1`, not `ContinueOutsideLoop`. The sentence's own example only
-  covers `break`, which is the one form that behaves as claimed, so the wrong half went unnoticed.
-  `(continue)` with no argument does give `ContinueOutsideLoop`, and inside a loop both forms
-  report their arity error, so the divergence is only visible for `(continue 1)` outside a loop.
-  This is a false claim in the source of truth, not only an inconsistency between two defensible
-  orderings, so it is worth deciding which way to go: make `continue` check the loop first, or
-  correct the sentence. Either way one of the two must change. (Drift.md A17)
 
 Diagnostic timing, a documented choice rather than a defect:
 
@@ -106,14 +95,6 @@ Performance
   usable recursion headroom well past `MAX_CALL_DEPTH` (2048). This is no longer a crash
   hazard; the depth guard removed that, so it is a performance and expressiveness item.
 
-Design limitation
-=================
-
-- A function cannot be copied back out of a session. `%s` writes `<fn>` and `%x` refuses with
-  `FormatTypeError: %x cannot serialize function`. spec_en.md §20.2 documents `<fn>` in a table,
-  so under the current source of truth there is no drift to fix. It is recorded here because it
-  is a real limitation and a reasonable thing to revisit, not because it is a defect.
-
 Considered and dropped
 ======================
 
@@ -126,19 +107,22 @@ Recorded so the next reader knows these were re-checked rather than overlooked.
   rendered caret for a `$` error. The rest were genuinely untested, and the audit understated
   two of them. `expect` had *no* test at all, not just no arity test — `ExpectationError` had
   zero occurrences in the suite — so its success path, its two failure-message shapes from
-  spec_en.md:1149-1150, its arity error, its string-only third argument and its function
+  spec_en.md:1185-1187, its arity error, its string-only third argument and its function
   identity rule are all now asserted. And the width gap was wider than the width: while
   verifying it, three more documented claims turned out to have no test, namely that only `b`
   and `h` accept a width, that `%o` of a negative integer is its full 64-bit two's
   complement, and that reading a reserved or builtin name as a value is a `NameError`
-  (spec_en.md:418-420). Each new test asserts the exact documented text rather than the
+  (spec_en.md:431-432). Each new test asserts the exact documented text rather than the
   current output, so the spec is what is pinned.
 - Drift.md F11 is covered and was no longer accurate: `bit-shl` overflow is asserted by name in
   `integer_builtins_turn_operator_overflows_into_lisp_errors` (`src/tests/arithmetic.rs:25`),
   and `(bit-shl 4611686018427387904 2)` is verified as `IntegerOverflow`.
-- All of Drift.md's A, B, C, D and E classes are moot. `spec.txt` no longer exists, so an A or B
-  finding has no document to contradict; `spec_en.md` is the source of truth, and the one A-class
-  case with a live code consequence, A2, was fixed directly when `-NaN` became a literal.
+- Drift.md's A and B classes are set aside, not moot. `Archives/spec.txt` still exists and is the
+  document `spec_en.md` is translated from, with Appendix C there to track the differences, so an
+  A or B finding does have a second document to be measured against. What retired the classes is
+  the decision that `spec_en.md` alone is the source of truth: a divergence from `spec.txt` is
+  recorded in Appendix C rather than fixed in place. The one A-class case that had a live code
+  consequence, A2, was fixed directly when `-NaN` became a literal.
   `README.md` is now a 12-line stub whose only content is a pointer to `spec_en.md`, so the seven
   C findings and four D findings no longer describe any text that exists anywhere in the repo.
 - Every `Resolved:` entry that was in this file. 499 lines of resolved history, most of it
