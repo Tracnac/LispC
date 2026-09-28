@@ -115,3 +115,4 @@ Recorded so the next reader knows these were re-checked rather than overlooked.
 - Every `Resolved:` entry that was in this file. 499 lines of resolved history, most of it
   predating the spec rewrite, was the noise that prompted this cleanup. The reasoning lives in
   the commit log; what remains here is what is still true and still undone.
+- Renamed `$` to fmt.

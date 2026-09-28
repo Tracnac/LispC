@@ -386,9 +386,9 @@ spellings `_`, `+NaN`, `-NaN`, `+Inf` and `-Inf` are the only non-name runs the
 lexer accepts; `t`, `f`, `NaN` and `Inf` are ordinary names as far as the lexer
 is concerned, and the reader maps them to literals.
 
-`#` is not a comment character. Nothing in the language treats it specially, so
-it ends the run and is then rejected on its own:
-`ParseError: unexpected \`#\``.
+`#` is not a comment marker. A leading #! line is handled separately 
+before parsing (Section 21.2). Elsewhere, # ends a token run and is then 
+rejected on its own: ParseError: unexpected #``. Comments use ;.
 
 The lexer tries to read a number first, and a digit run followed by `e` or `E`
 claims an exponent rather than ending the literal: a literal whose exponent has
