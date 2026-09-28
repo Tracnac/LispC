@@ -199,7 +199,7 @@ continues past it and is then unterminated as well.
 character below 0x20 from source, so `"\u{1}"` is a string holding one byte of
 value 1. A raw string is the way to hold a backslash.
 
-A `'...'` raw string has no escapes at all, so `'ab\ncd'` is the eleven
+A `'...'` raw string has no escapes at all, so `'ab\ncd'` is the six
 characters `ab`, a backslash, `n`, `cd`. There is no way to embed a single quote,
 and a raw string cannot be adjacent to another token: `'it''s'` is two raw
 strings, so using it where one value is expected gives an `ArityError`.
@@ -861,6 +861,49 @@ against measured native stack use per call.
 
 For unbounded iteration use `loop`. Note that `(loop)` with an empty body never
 ends.
+
+### 6.4 Nesting limit
+
+Nesting is bounded to 20000 levels. This is a different bound from the call
+depth above: that one counts calls, and this one counts brackets. `[]`, `()` and
+`{}` all nest through the one reader, so one bound covers all three, and it
+covers `^` as well. A source nested past the limit is rejected while it is read:
+
+```
+RecursionError: nesting limit (20000) exceeded — is this data nested too deeply?
+```
+
+The dash in that message is the non-ASCII character U+2014 and is part of the
+output, as in Section 6.3.
+
+A level is one nested form, and the value at the centre of a literal is a form
+too, so a literal of 19999 brackets is the deepest one there is: it is 20000
+levels. 20000 brackets is 20001 levels and is rejected. The deepest array,
+struct and parenthesis nest alike.
+
+This is an ordinary language error, positioned with the usual `file:line:col` and
+caret on the bracket that went too deep. There is no call trace, because nothing
+has been called: the error is raised by the reader, before evaluation starts.
+
+Since 20000 is far above 2048, a nest of calls still reports the call depth from
+Section 6.3 and not this. The two bounds are independent: `(f (f (f ...)))` past
+20000 is a nesting error, a plain literal of 2048 levels is neither, and a
+literal of 20000 levels is a nesting error rather than the call depth.
+
+The interpreter runs on a thread with an explicit 256 MiB stack, so this bound
+and not the native stack bounds the nesting, exactly as for calls. The value is
+calibrated against the measured native stack use of the reader in a debug build,
+which is the looser of the two profiles and so the binding one: a debug frame is
+several times the size of an optimised one, and a limit calibrated on the
+release build alone would leave a debug build aborting on input the release build
+rejects cleanly.
+
+A value's depth is normally bounded by the nesting that produced it, so the
+walks that render or compare values — `%s`, `%v`, `%x`, `%q`, `%j` and `eq` —
+have more measured headroom than this bound and carry no limit of their own.
+Building a deeper value at runtime instead of reading one is possible, but it
+costs a nested drop per level, so it is quadratically expensive and does not
+reach a depth those walks cannot take.
 
 ---
 
@@ -2341,6 +2384,7 @@ An empty file runs and exits with 0.
 | Limit | Value |
 | ----- | ----- |
 | Maximum call depth | 2048 |
+| Maximum nesting depth | 20000 |
 | Interpreter thread stack | 256 MiB |
 | Call trace frames printed | 40 |
 
@@ -2521,4 +2565,9 @@ is auditable. Each item was verified against the interpreter.
   ends first. See Section 20.10.
 - A slice or a multi-index selector must be the last step of a postfix chain.
   Section 1.3 here is new.
+- A second nesting bound was added, 20000 levels, alongside the 2048 call-depth
+  bound. spec.txt section 6 documents only the call bound, and states that the
+  guard and not the native stack bounds recursion; that was true of calls alone,
+  since bracket nesting was uncounted and a deeply nested literal aborted the
+  process with no diagnostic. Section 6.4 here is new.
 - `:i` scope words are `session`, `enclosing` and `outer`.
