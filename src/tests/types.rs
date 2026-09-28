@@ -58,11 +58,18 @@ fn a_negative_nan_is_reserved_like_a_negative_infinity() {
     }
     // Only the capitalised spellings were promoted. The lowercase ones were
     // names before this and are names still, so the float parser must not be
-    // reaching them.
-    for src in ["-nan", "-inf", "nan", "inf", "-infinity", "e3"] {
+    // reaching them. The signed lowercase spellings are not names at all:
+    // a name must start with a letter.
+    for src in ["nan", "inf", "e3"] {
         assert!(
             matches!(run(src), Err(Error::Name(_))),
             "{src} should still be a name"
+        );
+    }
+    for src in ["-nan", "-inf", "-infinity"] {
+        assert!(
+            matches!(run(src), Err(Error::Parse(message)) if message == format!("invalid name `{src}`")),
+            "{src} should be refused as an invalid name"
         );
     }
 }

@@ -483,7 +483,7 @@ fn lex_tokens(src: &str, at: &mut usize) -> Result<Vec<Tok>, Error> {
             i += 1;
             continue;
         }
-        if matches!(c, '$' | '~') {
+        if c == '$' {
             out.push(Tok {
                 kind: TokKind::Symbol(c.to_string()),
                 span: Span {
@@ -606,7 +606,7 @@ fn lex_tokens(src: &str, at: &mut usize) -> Result<Vec<Tok>, Error> {
                     end: i,
                 },
             })
-        } else {
+        } else if is_name(&s) || matches!(s.as_str(), "_" | "+NaN" | "-NaN" | "+Inf" | "-Inf") {
             out.push(Tok {
                 kind: TokKind::Symbol(s),
                 span: Span {
@@ -614,9 +614,21 @@ fn lex_tokens(src: &str, at: &mut usize) -> Result<Vec<Tok>, Error> {
                     end: i,
                 },
             })
+        } else {
+            return Err(Error::Parse(format!("invalid name `{s}`")));
         }
     }
     Ok(out)
+}
+
+/// A name is a letter followed by any run of letters, digits, `_` and `-`
+/// (spec §2.1). The literal spellings the parser maps to values but which
+/// break that rule — `_` and the signed `NaN`/`Inf` forms — are whitelisted
+/// by the caller; `t`, `f`, `NaN` and `Inf` already match it.
+fn is_name(s: &str) -> bool {
+    s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 fn number(s: &str) -> Result<Option<TokKind>, Error> {
     let (sign, rest) = if let Some(x) = s.strip_prefix('-') {
@@ -779,8 +791,13 @@ impl Parser {
     fn postfix_tail(&mut self, mut e: Expr) -> Result<Expr, Error> {
         loop {
             match self.peek().map(|t| &t.kind) {
+                // A dot is field access only on a name path (Section 3.1):
+                // after any other expression it is just an unexpected token.
                 Some(TokKind::Dot)
-                    if self
+                    if matches!(
+                        &e.kind,
+                        ExprKind::Symbol(_) | ExprKind::Field(_, _) | ExprKind::Index(_, _)
+                    ) && self
                         .peek()
                         .is_some_and(|token| token.span.start == e.span.end) =>
                 {

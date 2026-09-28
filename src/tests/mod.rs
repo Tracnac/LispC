@@ -76,6 +76,7 @@ mod comparisons;
 mod control_flow;
 mod core;
 mod errors;
+mod grammar;
 mod http;
 mod io;
 mod modules;

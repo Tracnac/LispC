@@ -71,7 +71,9 @@ An integer literal is an optional sign followed by:
 - `0b` and at least one binary digit, or
 - `0o` and at least one octal digit.
 
-The prefixes are lowercase only. `0X10` is not a number, it is the name `0X10`.
+The prefixes are lowercase only. `0X10` is not a number, and since a name must
+start with a letter (Section 2.1) it is not a name either: it is a
+`ParseError: invalid name \`0X10\``.
 There is no octal shorthand: `017` is the decimal number 17. A sign is allowed on
 a prefixed literal, so `-0x10` is -16.
 
@@ -88,15 +90,18 @@ The radix form is read into an unsigned 64 bit value first, so
 `0xFFFFFFFFFFFFFFFF` is out of range, and the octal literal with 22 digits
 exceeds even 64 unsigned bits and fails the parse entirely.
 
-A prefix with no digit after it, such as `0x`, is not a number at all. It is the
-name `0x`.
+A prefix with no digit after it, such as `0x`, is not a number at all. It starts
+with a digit, so it is not a name either: it is a `ParseError: invalid name
+\`0x\`` (Section 2.1).
 
 A float literal is a sign, then digits, then a dot, then digits. All three parts
 are required:
 
 - `.5` is a `ParseError: unexpected token Dot`.
-- `5.` is a `ParseError: expected struct field after dot`.
-- `1_000` is not a number, it is the name `1_000`.
+- `5.` is a `ParseError: unexpected token Dot`: a dot is field access only on a
+  name path (Section 3.1), so after a number it is not a postfix at all.
+- `1_000` is not a number, and a digit-led run is not a name: it is a
+  `ParseError: invalid name \`1_000\`` (Section 2.1).
 
 A float literal may instead carry an exponent, which is `e` or `E`, then an
 optional `+` or `-`, then at least one digit. The dot is optional, so `1.5e2`
@@ -129,9 +134,9 @@ finishing it is an error rather than a name:
 `1e.3` is named against `1e` and not against the whole of the source. A literal
 ends at the last digit of its exponent, so the dot was never part of the token
 and the token is rejected before the dot is read at all. The same is true of
-`5.e2`, which is not a literal either: a dot needs a digit after it, so `5.e2`
-is the name `5` and a field access, a
-`TypeError: reference target must be a variable or field`.
+`5.e2`, which is not a literal either: a dot needs a digit after it in a float,
+and a dot after a number is not field access, so `5.e2` is a
+`ParseError: unexpected token Dot` (Section 3.1).
 
 A literal ends at its last digit, so anything after it is lexed as a separate
 token, the same as after a decimal float. `1.5x` is the float `1.5` followed
@@ -154,9 +159,10 @@ recognised before an exponent is looked for, which is what keeps those two
 integers.
 
 The lowercase spellings `inf`, `nan` and `infinity` are names, not float
-literals, and neither is `-nan`. Only the capitalised forms below are literals,
-so a float parser that also accepted the lowercase spellings would be wrong
-here.
+literals. Only the capitalised forms below are literals, so a float parser that
+also accepted the lowercase spellings would be wrong here. The signed lowercase
+forms `-nan` and `-inf` are not even names — a name must start with a letter —
+so they are a `ParseError: invalid name` (Section 2.1).
 
 Six float literals are predefined: `NaN`, `+NaN`, `-NaN`, `Inf`, `+Inf` and
 `-Inf`. A leading `-` negates. On an infinity that picks the other sign, and on
@@ -218,7 +224,8 @@ An unterminated string is a `ParseError`.
 - Every slice and every multi-select returns a new array value.
 - Struct keys must be a single unquoted name. `{"a": 1}` is a `ParseError`, and so
   is `{1: 2}` and `{a b: 1}`. A duplicate key is a `DuplicateKeyError`. Insertion
-  order is preserved. A key may use any name characters, so `{a/b: 1}` is fine.
+  order is preserved. A key is a name, so it follows the rule of Section 2.1:
+  `{a/b: 1}` is a `ParseError: invalid name \`a/b\``.
 - A comma may optionally separate two adjacent elements of `[]`, or two
   adjacent fields of `{}`. It is a separator, not whitespace, so at most one
   comma stands between two adjacent items, and a comma after the last item is
@@ -360,30 +367,34 @@ agree, because such a code point is always its own cluster:
 
 ### 2.1 Identifiers
 
-A name is any run of characters that is not whitespace and does not contain one
-of these:
+A name is a letter (`A`-`Z`, `a`-`z`) followed by any run of letters, digits,
+`_` and `-` — as a regular expression, `^[A-Za-z][A-Za-z0-9_-]*$`. So `abc`,
+`x1`, `foo-bar` and `a_b` are names, while `1a`, `a/b` and `-foo` are not.
+
+The lexer first splits the source at whitespace and at these delimiter
+characters:
 
 ```
 (  )  [  ]  {  }  :  ,  .  ^  "  '  ;  #
 ```
 
-So names may use letters, digits, `-`, `_`, `/`, `+`, `=`, `*`, `!`, `?`, `<` and
-other symbols. `a/b`, `a=b` and `1a` are valid names.
+A run between delimiters that is neither a number (Section 1.1) nor a name is
+rejected: `ParseError: invalid name \`<run>\``. So `1a`, `a/b`, `1_000`, `0X10`
+and a bare `0x` are each a `ParseError: invalid name`, and so is a bare `~`,
+which is only meaningful inside a `$` format string (Section 15). The literal
+spellings `_`, `+NaN`, `-NaN`, `+Inf` and `-Inf` are the only non-name runs the
+lexer accepts; `t`, `f`, `NaN` and `Inf` are ordinary names as far as the lexer
+is concerned, and the reader maps them to literals.
 
 `#` is not a comment character. Nothing in the language treats it specially, so
-it ends the name and is then rejected on its own:
+it ends the run and is then rejected on its own:
 `ParseError: unexpected \`#\``.
 
-The lexer tries to read a number first. If that fails it falls back to reading a
-name. So `0x`, `0b`, `0o` and `1_000` are all names, not numbers. `0X10`
-is a name too, because the numeric prefixes are lowercase only.
-
-A name may start with a digit, as `1a` does, but not with a digit run followed
-by `e` or `E`. That is an exponent, so it is read as the start of a float
-literal, and a literal whose exponent has no digits is an error rather than a
-name. So `1e` is a `ParseError: invalid number \`1e\``, and so are `1ea` and
-`1element`, which are reported against the `1e` they begin with. `1a` is
-unaffected, because `a` is not an exponent marker.
+The lexer tries to read a number first, and a digit run followed by `e` or `E`
+claims an exponent rather than ending the literal: a literal whose exponent has
+no digits is an error rather than a name. So `1e` is a
+`ParseError: invalid number \`1e\``, and so are `1ea` and `1element`, which are
+reported against the `1e` they begin with.
 
 A `let` name and a `fn` parameter name must be a name token. A string, a number
 or a literal in that position is a `TypeError: let name must be an identifier`.
@@ -645,8 +656,10 @@ selector      := form | form ".." form | "[" form* "]"
 
 ### 3.1 Access paths must start at a variable
 
-A field access always needs a variable at its root. `({a: 1}).a` is a
-`TypeError: reference target must be a variable or field`.
+A field access always needs a variable at its root, and the reader enforces the
+root early: the postfix dot only attaches to a name, a field or an index, so
+`({a: 1}).a` and `5.x` are each a `ParseError: unexpected token Dot`, the same
+error a leading dot gives.
 
 An index chain of two or more links also needs a variable at its root:
 
@@ -2460,6 +2473,18 @@ is auditable. Each item was verified against the interpreter.
     interrupted instead, so a program that will not finish can be inspected,
     corrected and resumed, and is ended with `:q`. `Interrupted` is now only the
     no-controlling-terminal case. Section 20.10 here.
+12. The name rule. spec.txt section 2 lets a name be any run of non-delimiter
+    characters, so `1a`, `a/b` and `1_000` are names there. Here a name must
+    match `^[A-Za-z][A-Za-z0-9_-]*$` (Section 2.1), and any other non-numeric
+    run is a `ParseError: invalid name \`<run>\``. This is a deliberate
+    tightening, not a correction of a misreading: it also retires the
+    standalone `~` name, which stays meaningful only inside `$` format
+    strings.
+13. The field-access root rule moved from evaluation to the reader. A dot
+    after a literal or a block, as in `5.x` or `({a: 1}).a`, was a `TypeError:
+    reference target must be a variable or field`; it is now a `ParseError:
+    unexpected token Dot` (Section 3.1). The runtime rule still covers index
+    chains such as `[[1 2] [3 4]][1][2]`.
 
 ### Implementation behaviour worth knowing
 

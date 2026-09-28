@@ -658,10 +658,18 @@ fn a_float_name_is_not_read_as_an_exponent_literal() {
     // float literals; these stay names and stay unbound. `-NaN` is not in this
     // list because it is a literal of its own now, and it is a name for a
     // different reason: the parser's table is what resolves it.
-    for src in ["inf", "nan", "infinity", "-inf", "-nan", "e3", "E3"] {
+    for src in ["inf", "nan", "infinity", "e3", "E3"] {
         assert!(
             matches!(run(src), Err(Error::Name(_))),
             "{src} should still be a name and not a number"
+        );
+    }
+    // A signed lowercase spelling is not a name at all: a name must start
+    // with a letter, so the lexer refuses the run.
+    for src in ["-inf", "-nan", "-infinity"] {
+        assert!(
+            matches!(run(src), Err(Error::Parse(message)) if message == format!("invalid name `{src}`")),
+            "{src} should be refused as an invalid name"
         );
     }
     check(r#"($ "%t:%s" Inf Inf)"#, r#""float:Inf""#);
