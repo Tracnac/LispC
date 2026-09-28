@@ -2304,7 +2304,9 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, call_span: Span) -> 
                             .collect::<Result<Vec<_>, _>>()
                             .map_err(Flow::Error)?
                     }
-                    _ => return Err(Error::Type("fn parameters must use ()".into()).into()),
+                    _ => {
+                        return Err(Error::Parse("fn parameters must use ()".into()).into());
+                    }
                 };
                 if let Some(p) = ps.iter().find(|p| is_reserved_name(p)) {
                     return Err(Error::Type(format!(

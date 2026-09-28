@@ -420,7 +420,7 @@ fn fn_parameter_list_must_use_parentheses() {
         "(fn {a: 1} (y) y)",
     ] {
         assert!(
-            matches!(run(src), Err(Error::Type(message)) if message == "fn parameters must use ()"),
+            matches!(run(src), Err(Error::Parse(message)) if message == "fn parameters must use ()"),
             "{src} should be refused, the parameter list must use ()"
         );
     }

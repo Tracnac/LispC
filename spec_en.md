@@ -767,11 +767,11 @@ and `fn` has no form that binds a function under a name of its own.
 ```
 (fn (a b) (add a b))   ; a function of arity 2
 (fn () 7)              ; a function of arity 0
-(fn hlp (y) y)         ; TypeError: fn parameters must use ()
+(fn hlp (y) y)         ; ParseError: fn parameters must use ()
 ```
 
 Anything that is not a parenthesised form in that position gives
-`TypeError: fn parameters must use ()`, so `(fn 1 (y) y)`, `(fn t (y) y)`,
+`ParseError: fn parameters must use ()`, so `(fn 1 (y) y)`, `(fn t (y) y)`,
 `(fn [1] (y) y)` and `(fn {a: 1} (y) y)` are all that error. Fewer than two
 forms after `fn` is a `ArityError: fn expects parameters and body` instead.
 
