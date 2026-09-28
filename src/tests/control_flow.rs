@@ -25,6 +25,39 @@ fn break_inside_match_inside_loop_exits_the_loop() {
     );
 }
 
+/// `break` and `continue` both check their argument count before they check
+/// for an enclosing loop, so a wrong argument count is an arity error whether
+/// or not a loop is there.
+#[test]
+fn the_arity_check_comes_before_the_loop_check_for_break_and_continue() {
+    for src in [
+        "(break 1 2)",
+        "(continue 1)",
+        "(let h (fn () (break 1 2))) (h)",
+        "(let h (fn () (continue 1))) (h)",
+        "(let h (fn () (break 1 2))) (loop (h))",
+        "(let h (fn () (continue 1))) (loop (h))",
+    ] {
+        assert!(
+            matches!(run(src), Err(Error::Arity(_))),
+            "{src} should be an arity error, the count is checked first"
+        );
+    }
+    // The exact message for each, so the pair cannot drift into one text.
+    assert!(matches!(
+        run("(break 1 2)"),
+        Err(Error::Arity(message)) if message == "break expects zero or one argument"
+    ));
+    assert!(matches!(
+        run("(continue 1)"),
+        Err(Error::Arity(message)) if message == "continue expects 0 arguments, got 1"
+    ));
+    // With the arguments right, the loop error is what is left.
+    assert!(matches!(run("(break)"), Err(Error::BreakOutside)));
+    assert!(matches!(run("(break 1)"), Err(Error::BreakOutside)));
+    assert!(matches!(run("(continue)"), Err(Error::ContinueOutsideLoop)));
+}
+
 #[test]
 fn and_of_true_and_true_is_true() {
     check(r#"(and t t)"#, r#"t"#);

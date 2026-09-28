@@ -2344,11 +2344,11 @@ fn call(head: &Expr, args: &[Expr], env: &EnvRef, l: usize, call_span: Span) -> 
                 }
             }
             "break" => {
-                if l == 0 {
-                    return Err(Error::BreakOutside.into());
-                }
                 if args.len() > 1 {
                     return Err(Error::Arity("break expects zero or one argument".into()).into());
+                }
+                if l == 0 {
+                    return Err(Error::BreakOutside.into());
                 }
                 return Err(Flow::Break(if args.is_empty() {
                     Value::Null

@@ -1221,8 +1221,11 @@ body is not in the loop. The same is true of `continue`, which gives
 
 `break` accepts zero or one argument, `ArityError: break expects zero or one
 argument` otherwise. `continue` accepts none, `ArityError: continue expects 0
-arguments, got 1` otherwise. Outside a loop both report the loop error first, so
-`(break 1 2)` outside a loop is a `BreakOutsideLoop` and not an arity error.
+arguments, got 1` otherwise. Both report the arity error before the loop error,
+so `(break 1 2)` outside a loop is an arity error and not a `BreakOutsideLoop`,
+the same as `(continue 1)`. The loop error is reached only once the arguments
+are right, so `(break)` and `(break 1)` outside a loop are a `BreakOutsideLoop`
+and `(continue)` is a `ContinueOutsideLoop`.
 
 A `loop` with an empty body never ends. There is no iteration guard.
 
