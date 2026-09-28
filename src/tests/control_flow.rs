@@ -199,6 +199,16 @@ fn not_treats_arrays_as_true() {
 }
 
 #[test]
+fn empty_string_struct_and_nonzero_float_are_truthy() {
+    check(r#"(not "")"#, "f");
+    check("(not {})", "f");
+    check("(not 1.0)", "f");
+    check(r#"(if "" "yes" "no")"#, r#""yes""#);
+    check("(if {} \"yes\" \"no\")", "\"yes\"");
+    check("(if 1.0 \"yes\" \"no\")", "\"yes\"");
+}
+
+#[test]
 fn and_skips_second_operand_after_false() {
     check(r#"(and f (div 1 0))"#, r#"f"#);
 }

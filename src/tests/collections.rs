@@ -14,6 +14,57 @@ fn arrays_support_bracket_indexing_and_inclusive_slices() {
 }
 
 #[test]
+fn array_index_and_slice_boundaries_have_the_documented_errors() {
+    for source in [
+        "(let a [1 2 3]) a[0]",
+        "(let a [1 2 3]) a[..0]",
+        "(let a [1 2 3]) a[0..]",
+        "(let a [1 2 3]) a[3..1]",
+        "(let a [1 2 3]) a[-1..1]",
+    ] {
+        assert!(
+            matches!(run(source), Err(Error::Type(_))),
+            "{source} should produce TypeError"
+        );
+    }
+    assert!(matches!(
+        run("(let a [1 2 3]) a[4]"),
+        Err(Error::Name(message)) if message == "array index 4 out of bounds"
+    ));
+}
+
+#[test]
+fn array_slice_and_multi_select_postfix_and_reference_targets_are_rejected() {
+    for (source, message) in [
+        (
+            "(let a [1 2 3]) a[1..2][1]",
+            "a slice cannot be a reference target",
+        ),
+        (
+            "(let a [1 2 3]) a[1..2].x",
+            "a slice cannot be a reference target",
+        ),
+        (
+            "(let a [1 2 3]) a[[1 2]][[1]]",
+            "a multi-index selector cannot be a reference target",
+        ),
+        (
+            "(let a [1 2 3]) (^a[1..2])",
+            "a slice cannot be a reference target",
+        ),
+        (
+            "(let a [1 2 3]) (^a[[1 2]])",
+            "a multi-index selector cannot be a reference target",
+        ),
+    ] {
+        assert!(
+            matches!(run(source), Err(Error::Type(actual)) if actual == message),
+            "{source} should produce TypeError: {message}"
+        );
+    }
+}
+
+#[test]
 fn fully_open_slice_of_empty_array_is_empty() {
     check("(let a []) (let b a[..]) b", "[]");
 }
@@ -169,6 +220,12 @@ fn struct_keys_use_identifier_syntax() {
         run(r#"{"name":"Yvan"}"#),
         Err(Error::Parse(message)) if message == "struct key must be an identifier"
     ));
+    for source in ["{1: 2}", "{a b: 1}"] {
+        assert!(
+            matches!(run(source), Err(Error::Parse(_))),
+            "{source} should reject a non-identifier struct key"
+        );
+    }
 }
 
 #[test]

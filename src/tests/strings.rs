@@ -26,12 +26,22 @@ fn string_index_errors_match_collection_rules() {
     ));
     assert!(matches!(
         run(r#""abc"[4]"#),
-        Err(Error::Name(message)) if message.contains("out of bounds")
+        Err(Error::Name(message)) if message == "string index 4 out of bounds"
     ));
     assert!(matches!(
         run(r#""abc"[1.0]"#),
         Err(Error::Type(message)) if message.contains("integer")
     ));
+    assert!(matches!(
+        run(r#""éx"[3]"#),
+        Err(Error::Name(message)) if message == "string index 3 out of bounds"
+    ));
+    for source in [r#""abc"[..0]"#, r#""abc"[0..]"#, r#""abc"[3..1]"#] {
+        assert!(
+            matches!(run(source), Err(Error::Type(_))),
+            "{source} should produce TypeError"
+        );
+    }
 }
 
 #[test]
@@ -1252,20 +1262,17 @@ fn nested_percent_s_escapes_with_the_readers_own_escapes() {
 /// stray backslash cannot silently swallow the character that follows it.
 #[test]
 fn unknown_string_escapes_are_a_parse_error() {
-    for source in [
-        r#""\q""#,
-        r#""\0""#,
-        r#""\x41""#,
-        r#""\b""#,
-        r#""\f""#,
-        r#""\e""#,
-        r#""\a\zb""#,
+    for (source, message) in [
+        (r#""\q""#, "unknown escape sequence \\q"),
+        (r#""\0""#, "unknown escape sequence \\0"),
+        (r#""\x41""#, "unknown escape sequence \\x"),
+        (r#""\b""#, "unknown escape sequence \\b"),
+        (r#""\f""#, "unknown escape sequence \\f"),
+        (r#""\e""#, "unknown escape sequence \\e"),
+        (r#""\a\zb""#, "unknown escape sequence \\a"),
     ] {
         assert!(
-            matches!(
-                run(source),
-                Err(Error::Parse(message)) if message.starts_with("unknown escape sequence")
-            ),
+            matches!(run(source), Err(Error::Parse(actual)) if actual == message),
             "{source} was accepted"
         );
     }
@@ -1287,10 +1294,22 @@ fn unknown_string_escapes_are_a_parse_error() {
         assert_eq!(text, expected, "{escape} decoded wrongly");
     }
 
-    // A raw string takes no escapes, so a backslash there is just a character.
-    for source in [r#"'ab\ncd'"#, r#"'ab\qcd'"#, r#"'a\tb'"#] {
-        assert!(run(source).is_ok(), "raw string {source} was rejected");
+    // A raw string takes no escapes, so the backslash and following character
+    // are retained verbatim.
+    for (source, expected) in [
+        (r#"'ab\ncd'"#, "ab\\ncd"),
+        (r#"'ab\qcd'"#, "ab\\qcd"),
+        (r#"'a\tb'"#, "a\\tb"),
+    ] {
+        assert!(
+            matches!(run(source), Ok(Value::Str(value)) if value == expected),
+            "raw string {source} should produce {expected:?}"
+        );
     }
+    assert!(matches!(
+        run("(not 'it''s')"),
+        Err(Error::Arity(message)) if message == "not expects 1 arguments, got 2"
+    ));
 }
 
 /// `\u{HEX}` names one Unicode scalar value. `HEX` is one or more hexadecimal
@@ -1325,40 +1344,91 @@ fn unicode_escapes_name_one_code_point() {
 /// above the last code point, or in the surrogate range.
 #[test]
 fn unicode_escapes_reject_non_scalar_values() {
-    for (source, expected) in [
-        (r#""\u{110000}""#, "above the last code point"),
-        (r#""\u{FFFFFF}""#, "above the last code point"),
-        (r#""\u{FFFFFFFFFFFFFFFF}""#, "above the last code point"),
-        (r#""\u{D800}""#, "surrogate range"),
-        (r#""\u{d800}""#, "surrogate range"),
-        (r#""\u{DBFF}""#, "surrogate range"),
-        (r#""\u{DC00}""#, "surrogate range"),
-        (r#""\u{DFFF}""#, "surrogate range"),
+    for (source, message) in [
+        (
+            r#""\u{110000}""#,
+            "\\u{110000} is above the last code point 10FFFF",
+        ),
+        (
+            r#""\u{FFFFFF}""#,
+            "\\u{FFFFFF} is above the last code point 10FFFF",
+        ),
+        (
+            r#""\u{FFFFFFFFFFFFFFFF}""#,
+            "\\u{FFFFFFFFFFFFFFFF} is above the last code point 10FFFF",
+        ),
+        (
+            r#""\u{D800}""#,
+            "\\u{D800} is in the surrogate range D800 to DFFF, which is not a character",
+        ),
+        (
+            r#""\u{d800}""#,
+            "\\u{d800} is in the surrogate range D800 to DFFF, which is not a character",
+        ),
+        (
+            r#""\u{DBFF}""#,
+            "\\u{DBFF} is in the surrogate range D800 to DFFF, which is not a character",
+        ),
+        (
+            r#""\u{DC00}""#,
+            "\\u{DC00} is in the surrogate range D800 to DFFF, which is not a character",
+        ),
+        (
+            r#""\u{DFFF}""#,
+            "\\u{DFFF} is in the surrogate range D800 to DFFF, which is not a character",
+        ),
     ] {
         assert!(
-            matches!(
-                run(source),
-                Err(Error::Parse(message)) if message.contains(expected)
-            ),
+            matches!(run(source), Err(Error::Parse(actual)) if actual == message),
             "{source} was accepted"
         );
     }
+    let malformed = "a unicode escape must be written \\u{HEX}";
     for source in [
-        r#""\u{}""#,
         r#""\u{ }""#,
         r#""\u41""#,
         r#""\u{41""#,
+        r#""\u{4 1}""#,
         r#""\u{41x}""#,
         r#""\u{ZZ}""#,
         r#""\u{-1}""#,
     ] {
         assert!(
-            matches!(
-                run(source),
-                Err(Error::Parse(message)) if message.contains("unicode escape")
-            ),
+            matches!(run(source), Err(Error::Parse(actual)) if actual == malformed),
             "{source} was accepted"
         );
+    }
+    assert!(matches!(
+        run(r#""\u{}""#),
+        Err(Error::Parse(message)) if message == "a unicode escape needs at least one digit"
+    ));
+}
+
+#[test]
+fn integer_and_float_formatters_report_documented_type_errors() {
+    for (source, expected) in [
+        (
+            r#"($ "%d" 1.0)"#,
+            "FormatError: FormatTypeError: %d expects integer",
+        ),
+        (
+            r#"($ "%d" "x")"#,
+            "FormatError: FormatTypeError: %d expects integer",
+        ),
+        (
+            r#"($ "%f" t)"#,
+            "FormatError: FormatTypeError: %f expects number",
+        ),
+        (
+            r#"($ "%f" "x")"#,
+            "FormatError: FormatTypeError: %f expects number",
+        ),
+    ] {
+        let error = match run(source) {
+            Err(error) => error,
+            Ok(_) => panic!("{source} should fail"),
+        };
+        assert_eq!(error.to_string(), expected, "{source}");
     }
 }
 

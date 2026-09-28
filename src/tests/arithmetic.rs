@@ -18,6 +18,27 @@ fn variadic_folds_preserve_numeric_errors() {
 }
 
 #[test]
+fn arithmetic_rejects_non_numeric_operands() {
+    for source in [
+        "(add \"1\" 2)",
+        "(sub 2 t)",
+        "(mul 2 _)",
+        "(div 2 [])",
+        "(mod 7.0 2)",
+    ] {
+        let expected = if source.starts_with("(mod ") {
+            "mod requires integers"
+        } else {
+            "expected number"
+        };
+        assert!(
+            matches!(run(source), Err(Error::Type(message)) if message == expected),
+            "{source} should fail with TypeError: {expected}"
+        );
+    }
+}
+
+#[test]
 fn integer_builtins_turn_operator_overflows_into_lisp_errors() {
     for source in [
         "(div -9223372036854775808 -1)",

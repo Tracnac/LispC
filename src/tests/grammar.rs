@@ -84,6 +84,8 @@ fn float_literals_follow_the_float_rule() {
     // A float literal past the f64 range saturates to infinity, the same way
     // the float arithmetic paths do.
     assert_eq!(classify("1e999"), Class::Float(f64::INFINITY));
+    assert_eq!(classify("100000000000000000000.0"), Class::Float(1e20));
+    assert_eq!(classify("0.00000000000000000001"), Class::Float(1e-20));
 }
 
 #[test]
@@ -138,6 +140,10 @@ fn number_first_claims_keep_their_own_messages() {
             "integer out of range `99999999999999999999`",
         ),
         ("0xFFFFFFFFFFFFFFFF", "integer out of range"),
+        (
+            "0o7777777777777777777777",
+            "invalid number `0o7777777777777777777777`",
+        ),
     ] {
         assert!(
             matches!(run(src), Err(Error::Parse(m)) if m == message),
