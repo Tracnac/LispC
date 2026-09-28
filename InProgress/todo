@@ -74,24 +74,6 @@ Bug
   orderings, so it is worth deciding which way to go: make `continue` check the loop first, or
   correct the sentence. Either way one of the two must change. (Drift.md A17)
 
-- The format-error taxonomy is split into two shapes. A width that parses but is unsupported
-  gives a named sub-message; a width too large for `usize` gives a bare one that names neither
-  the specifier nor the width. Both are `Error::Format`, so both render as `FormatError: <msg>`.
-  Verified: `($ "%7b" 1)` is `FormatTypeError: %7b supports widths 8, 16, 32, or 64`
-  (`src/main.rs:3010`, and `:3026` for `%h`), while `($ "%99999999999999999999b" 1)` is the bare
-  `invalid binary width` (`src/main.rs:2921`, a `digits.parse::<usize>()` failure). An earlier
-  note in this file used `%5b` as the bare example, which is wrong: `%5b` gives the named
-  message like any other in-range width. Only `b` and `h` accept a width at all, which was
-  checked across every specifier: on `d`, `s`, `o`, `x`, `f`, `j`, `t`, `v`, `q`, `g` and `e` a
-  numeric width is not a selector at all and gives `capture selector without preceding %~`.
-  The bare half is also the one the spec never mentions: the error sub-message table at
-  spec_en.md:1618-1636 has eighteen rows and none of them is `invalid binary width`, so a
-  message the implementation can emit is absent from the source of truth. Fixing the taxonomy
-  means adding that row, naming the specifier in the parse failure, or folding both shapes into
-  the named one. Locked by `a_width_too_large_to_parse_is_reported_without_a_sub_message`,
-  which asserts the current bare text exactly, so a change to either shape has to touch the
-  test deliberately. (Drift.md B5)
-
 Diagnostic timing, a documented choice rather than a defect:
 
 - A Ctrl-C that lands during a blocking read is noticed when the read returns, so the notice
