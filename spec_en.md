@@ -1573,6 +1573,16 @@ binary form. A negative value uses its two's complement representation truncated
 to the requested width. `%8b` of 256 is `00000000`. Only the widths 8, 16, 32
 and 64 are accepted, so `%0b` and `%7b` are errors.
 
+A width too large to be a number is a different error from a width that is a
+number but not an accepted size. `%7b` names the sizes it accepts, and
+`%99999999999999999999b` reports an invalid binary width. The second message
+carries no `FormatTypeError:` sub-message, so it is a plain sub-message of the
+`FormatError`, where the first is a type error about the size. The word binary
+is used for both, so a hexadecimal width reports the same text:
+`%99999999999999999999h` also gives an invalid binary width. A width that is
+exactly the largest 64 bit unsigned value still parses, and is then rejected as
+an unsupported size.
+
 `%h` requires an integer and produces lowercase hexadecimal with no `0x` prefix.
 `%8h`, `%16h`, `%32h` and `%64h` produce a fixed width hexadecimal form of 2, 4,
 8 or 16 digits. A negative value uses two's complement truncated to the
@@ -1684,6 +1694,7 @@ that follow it. A bare `%~` with its two arguments emits nothing.
 | a capture index that is not a number | `FormatError: invalid capture index` |
 | a bad binary width | `FormatError: FormatTypeError: %7b supports widths 8, 16, 32, or 64` |
 | a bad hexadecimal width | `FormatError: FormatTypeError: %9h supports widths 8, 16, 32, or 64` |
+| a width too large for a number | `FormatError: invalid binary width` |
 | an integer expected by `%d` `%b` `%h` `%o` | `FormatError: FormatTypeError: %d expects integer` |
 | a number expected by `%f` | `FormatError: FormatTypeError: %f expects number` |
 | a string expected by `%q` | `FormatError: FormatTypeError: %q expects string` |

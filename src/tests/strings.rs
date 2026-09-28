@@ -1574,6 +1574,21 @@ fn a_width_too_large_to_parse_is_reported_without_a_sub_message() {
         // one place the format taxonomy splits. See the todo item.
         assert_eq!(error.to_string(), "FormatError: invalid binary width");
     }
+    // The boundary: the largest 64 bit unsigned value still parses, so it is
+    // the accepted-sizes message and not this one. The two shapes are adjacent.
+    let error = match run(r#"($ "%18446744073709551615b" 5)"#) {
+        Err(error) => error,
+        Ok(_) => panic!("the largest width is not an accepted size"),
+    };
+    assert_eq!(
+        error.to_string(),
+        "FormatError: FormatTypeError: %18446744073709551615b supports widths 8, 16, 32, or 64"
+    );
+    let error = match run(r#"($ "%18446744073709551616b" 5)"#) {
+        Err(error) => error,
+        Ok(_) => panic!("one past the largest width does not parse"),
+    };
+    assert_eq!(error.to_string(), "FormatError: invalid binary width");
 }
 
 #[test]
