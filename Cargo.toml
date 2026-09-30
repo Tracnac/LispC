@@ -11,11 +11,11 @@ ureq = "2"
 unicode-segmentation = "1"
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
 
 [profile.release.package."*"]
-opt-level = "z"
+opt-level = 3

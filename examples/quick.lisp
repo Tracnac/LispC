@@ -19,3 +19,5 @@
 ; udp:	UDP connection	Discussed / proposed
 ; unix:	Unix-domain socket	Discussed / proposed
 ; http:	HTTP resource	Discussed, but kept outside io.open
+
+(let fib (fn (n) (if (lt n 2) n (add (fib (sub n 1))(fib (sub n 2))))))
